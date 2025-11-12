@@ -151,6 +151,18 @@ class LXMFClient:
         self.router_thread = threading.Thread(target=self.router_job_loop, daemon=True)
         self.router_thread.start()
 
+    def get_terminal_width(self, default=70, max_width=90):
+        """Get terminal width with safe defaults for mobile"""
+        try:
+            import shutil
+            width = shutil.get_terminal_size().columns
+            # On very narrow screens (mobile), use smaller width
+            if width < 60:
+                return min(width - 2, 50)  # Leave margin, cap at 50
+            return min(width, max_width)
+        except:
+            return default
+
     def load_conversation_indices(self):
         """Load conversation indices from file"""
         if os.path.exists(self.conversations_file):
@@ -733,40 +745,68 @@ class LXMFClient:
         display_name = self.get_lxmf_display_name(clean_hash)
         if display_name:
             print(f"  Display name: {display_name}")
-    
+        
     def list_contacts(self):
         """List all contacts"""
         if not self.contacts:
             print("\nNo contacts saved\n")
             return
         
+        # Get responsive width
+        width = self.get_terminal_width(default=70, max_width=100)
+        
         # Sort by index
         sorted_contacts = sorted(self.contacts.items(), key=lambda x: x[1].get('index', 999999))
         
-        print(f"\n{'='*100}")
-        self._print_color("CONTACTS", Fore.CYAN + Style.BRIGHT)
-        print(f"{'='*100}")
-        print(f"{'#':<5} {'Nickname':<20} {'LXMF Display Name':<30} {'Hash':<32}")
-        print(f"{'-'*5} {'-'*20} {'-'*30} {'-'*32}")
-        
-        for name, data in sorted_contacts:
-            idx = data.get('index', '?')
-            hash_str = data['hash']
-            display_name = self.get_lxmf_display_name(hash_str)
+        # Adjust column widths for mobile
+        if width < 80:
+            # Mobile layout - narrower columns
+            name_width = 15
+            display_width = 20
+            print(f"\n{'='*width}")
+            self._print_color("CONTACTS", Fore.CYAN + Style.BRIGHT)
+            print(f"{'='*width}")
+            print(f"{'#':<4} {'Name':<{name_width}} {'Display':<{display_width}}")
+            print(f"{'-'*4} {'-'*name_width} {'-'*display_width}")
             
-            # Truncate names if too long
-            name_shown = name[:18] + ".." if len(name) > 20 else name
+            for name, data in sorted_contacts:
+                idx = data.get('index', '?')
+                hash_str = data['hash']
+                display_name = self.get_lxmf_display_name(hash_str)
+                
+                # Truncate names
+                name_shown = name[:name_width-2] + ".." if len(name) > name_width else name
+                
+                if display_name:
+                    display_shown = display_name[:display_width-2] + ".." if len(display_name) > display_width else display_name
+                    print(f"{idx:<4} {name_shown:<{name_width}} {display_shown:<{display_width}}")
+                else:
+                    print(f"{idx:<4} {name_shown:<{name_width}} {'<unknown>':<{display_width}}")
+        else:
+            # Desktop layout - full width
+            print(f"\n{'='*width}")
+            self._print_color("CONTACTS", Fore.CYAN + Style.BRIGHT)
+            print(f"{'='*width}")
+            print(f"{'#':<5} {'Nickname':<20} {'LXMF Display Name':<30} {'Hash':<32}")
+            print(f"{'-'*5} {'-'*20} {'-'*30} {'-'*32}")
             
-            if display_name:
-                display_shown = display_name[:28] + ".." if len(display_name) > 30 else display_name
-                print(f"{idx:<5} {name_shown:<20} {display_shown:<30} {hash_str}")
-            else:
-                print(f"{idx:<5} {name_shown:<20} {'<unknown>':<30} {hash_str}")
+            for name, data in sorted_contacts:
+                idx = data.get('index', '?')
+                hash_str = data['hash']
+                display_name = self.get_lxmf_display_name(hash_str)
+                
+                name_shown = name[:18] + ".." if len(name) > 20 else name
+                
+                if display_name:
+                    display_shown = display_name[:28] + ".." if len(display_name) > 30 else display_name
+                    print(f"{idx:<5} {name_shown:<20} {display_shown:<30} {hash_str}")
+                else:
+                    print(f"{idx:<5} {name_shown:<20} {'<unknown>':<30} {hash_str}")
         
-        print(f"{'='*100}")
-        self._print_color("\n💡 Tip: Send messages using contact number, e.g., 's 3 hello'", Fore.YELLOW)
+        print(f"{'='*width}")
+        self._print_color("\n💡 Send using: 's <#> <msg>'", Fore.YELLOW)
         print()
-        
+
     def send_message(self, recipient, content, title=None):
         """Send a message with optimized processing"""
         try:
@@ -1262,135 +1302,157 @@ class LXMFClient:
     def _show_main_help(self):
         """Show main help menu with categories"""
         if COLOR_ENABLED:
-            print(f"\n{Fore.WHITE}╔═══════════════════════════════════════════════════════════════════════╗")
-            print(f"║{' '*27}LXMF CLIENT COMMANDS{' '*27}║")
-            print(f"╠═══════════════════════════════════════════════════════════════════════╣")
+            # Get responsive width
+            width = self.get_terminal_width(default=60, max_width=71)
+            border = "═" * width
+            
+            print(f"\n{Fore.WHITE}╔{border}╗")
+            print(f"║{'LXMF CLIENT COMMANDS'.center(width)}║")
+            print(f"╠{border}╣")
             
             # Messaging commands
-            print(f"║                                                                       ║")
-            print(f"║  {Fore.CYAN}📨 MESSAGING COMMANDS{Fore.WHITE}                                              ║")
-            print(f"║  {'-'*67}  ║")
+            print(f"║{' ' * width}║")
+            print(f"║ {Fore.CYAN}📨 MESSAGING{Fore.WHITE}{' ' * (width - 13)}║")
+            print(f"║ {'-' * (width - 2)} ║")
+            
             commands = [
-                ("send <name/#/hash> <msg>", "s", "Send a message"),
-                ("reply <message>", "re", "Reply to last message"),
-                ("messages [count]", "m", "Show recent messages"),
-                ("messages list", "", "List all conversations"),
-                ("messages user <#>", "", "View full conversation"),
+                ("send <#> <msg>", "s", "Send message"),
+                ("reply <msg>", "re", "Reply to last"),
+                ("messages [n]", "m", "Recent messages"),
+                ("messages list", "", "All conversations"),
+                ("messages user <#>", "", "View conversation"),
             ]
+            
             for long_cmd, short_cmd, description in commands:
                 if short_cmd:
-                    short_display = f"{Fore.YELLOW}({short_cmd}){Fore.WHITE}"
-                    padding_after_short = 6 - len(short_cmd) - 2
+                    cmd_display = f"{Fore.CYAN}{long_cmd}{Fore.WHITE} {Fore.YELLOW}({short_cmd}){Fore.WHITE}"
+                    cmd_len = len(long_cmd) + len(short_cmd) + 4
                 else:
-                    short_display = " " * 6
-                    padding_after_short = 0
-                long_padded = f"{Fore.CYAN}{long_cmd:<24}{Fore.WHITE}"
-                short_padded = short_display + " " * padding_after_short
-                desc_padded = f"{description:<35}"
-                print(f"║  {long_padded} {short_padded} {desc_padded}  ║")
+                    cmd_display = f"{Fore.CYAN}{long_cmd}{Fore.WHITE}"
+                    cmd_len = len(long_cmd)
+                
+                # Truncate description if needed
+                desc_space = width - cmd_len - 5
+                if len(description) > desc_space:
+                    description = description[:desc_space-2] + ".."
+                
+                padding = " " * (width - cmd_len - len(description) - 4)
+                print(f"║ {cmd_display} {description}{padding} ║")
             
             # Contacts & Peers
-            print(f"║                                                                       ║")
-            print(f"║  {Fore.GREEN}👥 CONTACTS & PEERS{Fore.WHITE}                                                ║")
-            print(f"║  {'-'*67}  ║")
+            print(f"║{' ' * width}║")
+            print(f"║ {Fore.GREEN}👥 CONTACTS & PEERS{Fore.WHITE}{' ' * (width - 20)}║")
+            print(f"║ {'-' * (width - 2)} ║")
+            
             commands = [
-                ("contacts", "c", "List all contacts"),
-                ("add <name> <hash>", "a", "Add a contact"),
-                ("remove <name>", "rm", "Remove a contact"),
-                ("peers", "p", "List announced peers"),
-                ("sendpeer <#> <msg>", "sp", "Send to peer by number"),
-                ("addpeer <#> [name]", "ap", "Add peer to contacts"),
+                ("contacts", "c", "List contacts"),
+                ("add <name> <hash>", "a", "Add contact"),
+                ("remove <name>", "rm", "Remove contact"),
+                ("peers", "p", "List peers"),
+                ("sendpeer <#> <msg>", "sp", "Send to peer"),
+                ("addpeer <#> [name]", "ap", "Add to contacts"),
             ]
+            
             for long_cmd, short_cmd, description in commands:
                 if short_cmd:
-                    short_display = f"{Fore.YELLOW}({short_cmd}){Fore.WHITE}"
-                    padding_after_short = 6 - len(short_cmd) - 2
+                    cmd_display = f"{Fore.CYAN}{long_cmd}{Fore.WHITE} {Fore.YELLOW}({short_cmd}){Fore.WHITE}"
+                    cmd_len = len(long_cmd) + len(short_cmd) + 4
                 else:
-                    short_display = " " * 6
-                    padding_after_short = 0
-                long_padded = f"{Fore.CYAN}{long_cmd:<24}{Fore.WHITE}"
-                short_padded = short_display + " " * padding_after_short
-                desc_padded = f"{description:<35}"
-                print(f"║  {long_padded} {short_padded} {desc_padded}  ║")
+                    cmd_display = f"{Fore.CYAN}{long_cmd}{Fore.WHITE}"
+                    cmd_len = len(long_cmd)
+                
+                desc_space = width - cmd_len - 5
+                if len(description) > desc_space:
+                    description = description[:desc_space-2] + ".."
+                
+                padding = " " * (width - cmd_len - len(description) - 4)
+                print(f"║ {cmd_display} {description}{padding} ║")
             
             # Info & Stats
-            print(f"║                                                                       ║")
-            print(f"║  {Fore.MAGENTA}📊 INFORMATION & STATS{Fore.WHITE}                                             ║")
-            print(f"║  {'-'*67}  ║")
+            print(f"║{' ' * width}║")
+            print(f"║ {Fore.MAGENTA}📊 INFO & STATS{Fore.WHITE}{' ' * (width - 16)}║")
+            print(f"║ {'-' * (width - 2)} ║")
+            
             commands = [
-                ("stats", "st", "Show messaging statistics"),
-                ("status", "", "Show system status"),
-                ("address", "addr", "Show your LXMF address"),
-                ("replyto", "", "Show current reply target"),
+                ("stats", "st", "Messaging stats"),
+                ("status", "", "System status"),
+                ("address", "addr", "Your address"),
             ]
+            
             for long_cmd, short_cmd, description in commands:
                 if short_cmd:
-                    short_display = f"{Fore.YELLOW}({short_cmd}){Fore.WHITE}"
-                    padding_after_short = 6 - len(short_cmd) - 2
+                    cmd_display = f"{Fore.CYAN}{long_cmd}{Fore.WHITE} {Fore.YELLOW}({short_cmd}){Fore.WHITE}"
+                    cmd_len = len(long_cmd) + len(short_cmd) + 4
                 else:
-                    short_display = " " * 6
-                    padding_after_short = 0
-                long_padded = f"{Fore.CYAN}{long_cmd:<24}{Fore.WHITE}"
-                short_padded = short_display + " " * padding_after_short
-                desc_padded = f"{description:<35}"
-                print(f"║  {long_padded} {short_padded} {desc_padded}  ║")
+                    cmd_display = f"{Fore.CYAN}{long_cmd}{Fore.WHITE}"
+                    cmd_len = len(long_cmd)
+                
+                desc_space = width - cmd_len - 5
+                if len(description) > desc_space:
+                    description = description[:desc_space-2] + ".."
+                
+                padding = " " * (width - cmd_len - len(description) - 4)
+                print(f"║ {cmd_display} {description}{padding} ║")
             
             # Settings
-            print(f"║                                                                       ║")
-            print(f"║  {Fore.YELLOW}⚙️  SETTINGS{Fore.WHITE}                                                        ║")
-            print(f"║  {'-'*67}  ║")
+            print(f"║{' ' * width}║")
+            print(f"║ {Fore.YELLOW}⚙️  SETTINGS{Fore.WHITE}{' ' * (width - 13)}║")
+            print(f"║ {'-' * (width - 2)} ║")
+            
             commands = [
-                ("settings", "", "Show settings menu"),
-                ("name <new_name>", "n", "Change display name"),
-                ("interval <seconds>", "i", "Change announce interval"),
-                ("discoverannounce <on/off>", "da", "Toggle discovery alerts"),
+                ("settings", "set", "Settings menu"),
+                ("name <name>", "n", "Change name"),
+                ("interval <sec>", "i", "Announce interval"),
             ]
+            
             for long_cmd, short_cmd, description in commands:
                 if short_cmd:
-                    short_display = f"{Fore.YELLOW}({short_cmd}){Fore.WHITE}"
-                    padding_after_short = 6 - len(short_cmd) - 2
+                    cmd_display = f"{Fore.CYAN}{long_cmd}{Fore.WHITE} {Fore.YELLOW}({short_cmd}){Fore.WHITE}"
+                    cmd_len = len(long_cmd) + len(short_cmd) + 4
                 else:
-                    short_display = " " * 6
-                    padding_after_short = 0
-                long_padded = f"{Fore.CYAN}{long_cmd:<24}{Fore.WHITE}"
-                short_padded = short_display + " " * padding_after_short
-                desc_padded = f"{description:<35}"
-                print(f"║  {long_padded} {short_padded} {desc_padded}  ║")
+                    cmd_display = f"{Fore.CYAN}{long_cmd}{Fore.WHITE}"
+                    cmd_len = len(long_cmd)
+                
+                desc_space = width - cmd_len - 5
+                if len(description) > desc_space:
+                    description = description[:desc_space-2] + ".."
+                
+                padding = " " * (width - cmd_len - len(description) - 4)
+                print(f"║ {cmd_display} {description}{padding} ║")
             
             # System
-            print(f"║                                                                       ║")
-            print(f"║  {Fore.RED}🖥️  SYSTEM{Fore.WHITE}                                                            ║")
-            print(f"║  {'-'*67}  ║")
+            print(f"║{' ' * width}║")
+            print(f"║ {Fore.RED}🖥️  SYSTEM{Fore.WHITE}{' ' * (width - 13)}║")
+            print(f"║ {'-' * (width - 2)} ║")
+            
             commands = [
-                ("announce", "ann", "Announce now"),
-                ("clear", "cls", "Clear the screen"),
-                ("restart", "r", "Restart the client"),
-                ("help", "h", "Show this help"),
-                ("quit / exit", "q/e", "Exit"),
+                ("clear", "cls", "Clear screen"),
+                ("restart", "r", "Restart client"),
+                ("help", "h", "Show help"),
+                ("quit", "q", "Exit"),
             ]
+            
             for long_cmd, short_cmd, description in commands:
                 if short_cmd:
-                    short_display = f"{Fore.YELLOW}({short_cmd}){Fore.WHITE}"
-                    padding_after_short = 6 - len(short_cmd) - 2
+                    cmd_display = f"{Fore.CYAN}{long_cmd}{Fore.WHITE} {Fore.YELLOW}({short_cmd}){Fore.WHITE}"
+                    cmd_len = len(long_cmd) + len(short_cmd) + 4
                 else:
-                    short_display = " " * 6
-                    padding_after_short = 0
-                long_padded = f"{Fore.CYAN}{long_cmd:<24}{Fore.WHITE}"
-                short_padded = short_display + " " * padding_after_short
-                desc_padded = f"{description:<35}"
-                print(f"║  {long_padded} {short_padded} {desc_padded}  ║")
+                    cmd_display = f"{Fore.CYAN}{long_cmd}{Fore.WHITE}"
+                    cmd_len = len(long_cmd)
+                
+                desc_space = width - cmd_len - 5
+                if len(description) > desc_space:
+                    description = description[:desc_space-2] + ".."
+                
+                padding = " " * (width - cmd_len - len(description) - 4)
+                print(f"║ {cmd_display} {description}{padding} ║")
             
-            print(f"╚═══════════════════════════════════════════════════════════════════════╝{Style.RESET_ALL}")
-            print(f"\n{Fore.YELLOW}💡 Tip: Type 'settings' for configuration options{Style.RESET_ALL}\n")
+            print(f"╚{border}╝{Style.RESET_ALL}")
+            print(f"\n{Fore.YELLOW}💡 Type 'settings' for options{Style.RESET_ALL}\n")
         
         else:
-            # Fallback for no color - simplified version
-            print("\n╔═══════════════════════════════════════════════════════════════════════╗")
-            print("║                         LXMF CLIENT COMMANDS                          ║")
-            print("╠═══════════════════════════════════════════════════════════════════════╣")
-            print("║  Use 'help' to see all commands                                       ║")
-            print("║  Use 'settings' for configuration                                     ║")
-            print("╚═══════════════════════════════════════════════════════════════════════╝\n")
+            # Simplified fallback
+            print("\nLXMF CLIENT - Type 'help' for commands\n")
 
     def show_settings_menu(self):
         """Show interactive settings menu"""
@@ -1470,65 +1532,85 @@ class LXMFClient:
     def resolve_command(self, cmd):
         """Resolve command aliases to full commands"""
         return self.command_aliases.get(cmd, cmd)
-            
+                
     def list_peers(self):
         """List all announced LXMF peers"""
         with self.peers_lock:
             peers_copy = dict(self.announced_peers)
         
         if not peers_copy:
-            print("\nNo LXMF peers announced yet")
-            print("Wait for peers to announce or ask them to announce\n")
+            print("\nNo LXMF peers announced yet\n")
             return
         
-        # Sort by index (which is the order they were discovered)
+        # Get responsive width
+        width = self.get_terminal_width(default=70, max_width=95)
+        
         sorted_peers = sorted(peers_copy.items(), key=lambda x: x[1]['index'])
         
-        print(f"\n{'='*95}")
-        self._print_color("ANNOUNCED LXMF PEERS", Fore.CYAN + Style.BRIGHT)
-        print(f"{'='*95}")
-        print(f"{'#':<5} {'Display Name':<35} {'Hash':<32} {'Last Seen':<15}")
-        print(f"{'-'*5} {'-'*35} {'-'*32} {'-'*15}")
+        print(f"\n{'='*width}")
+        self._print_color("ANNOUNCED PEERS", Fore.CYAN + Style.BRIGHT)
+        print(f"{'='*width}")
         
-        for hash_str, peer_data in sorted_peers:
-            peer_index = peer_data['index']
-            display_name = peer_data['display_name']
-            last_seen = peer_data['last_seen']
+        if width < 80:
+            # Mobile layout
+            print(f"{'#':<4} {'Display Name':<25} {'Last Seen':<12}")
+            print(f"{'-'*4} {'-'*25} {'-'*12}")
             
-            # Format last seen time
-            time_diff = time.time() - last_seen
-            if time_diff < 60:
-                time_str = "just now"
-            elif time_diff < 3600:
-                minutes = int(time_diff / 60)
-                time_str = f"{minutes}m ago"
-            elif time_diff < 86400:
-                hours = int(time_diff / 3600)
-                time_str = f"{hours}h ago"
-            else:
-                days = int(time_diff / 86400)
-                time_str = f"{days}d ago"
+            for hash_str, peer_data in sorted_peers:
+                peer_index = peer_data['index']
+                display_name = peer_data['display_name']
+                last_seen = peer_data['last_seen']
+                
+                time_diff = time.time() - last_seen
+                if time_diff < 60:
+                    time_str = "now"
+                elif time_diff < 3600:
+                    time_str = f"{int(time_diff/60)}m"
+                elif time_diff < 86400:
+                    time_str = f"{int(time_diff/3600)}h"
+                else:
+                    time_str = f"{int(time_diff/86400)}d"
+                
+                is_contact = any(data['hash'].lower() == hash_str for data in self.contacts.values())
+                marker = "★" if is_contact else " "
+                
+                display_shown = display_name[:23] + ".." if len(display_name) > 25 else display_name
+                
+                print(f"{marker}{peer_index:<3} {display_shown:<25} {time_str:<12}")
+        else:
+            # Desktop layout
+            print(f"{'#':<5} {'Display Name':<35} {'Hash':<32} {'Last Seen':<15}")
+            print(f"{'-'*5} {'-'*35} {'-'*32} {'-'*15}")
             
-            # Check if already in contacts
-            is_contact = False
-            for contact_name, contact_data in self.contacts.items():
-                if contact_data['hash'].lower() == hash_str:
-                    is_contact = True
-                    break
-            
-            # Truncate display name if too long
-            display_shown = display_name[:33] + ".." if len(display_name) > 35 else display_name
-            
-            # Mark contacts with a star
-            marker = "★" if is_contact else " "
-            
-            print(f"{marker}{peer_index:<4} {display_shown:<35} {hash_str:<32} {time_str:<15}")
+            for hash_str, peer_data in sorted_peers:
+                peer_index = peer_data['index']
+                display_name = peer_data['display_name']
+                last_seen = peer_data['last_seen']
+                
+                time_diff = time.time() - last_seen
+                if time_diff < 60:
+                    time_str = "just now"
+                elif time_diff < 3600:
+                    minutes = int(time_diff / 60)
+                    time_str = f"{minutes}m ago"
+                elif time_diff < 86400:
+                    hours = int(time_diff / 3600)
+                    time_str = f"{hours}h ago"
+                else:
+                    days = int(time_diff / 86400)
+                    time_str = f"{days}d ago"
+                
+                is_contact = any(data['hash'].lower() == hash_str for data in self.contacts.values())
+                marker = "★" if is_contact else " "
+                
+                display_shown = display_name[:33] + ".." if len(display_name) > 35 else display_name
+                
+                print(f"{marker}{peer_index:<4} {display_shown:<35} {hash_str:<32} {time_str:<15}")
         
-        print(f"{'='*95}")
+        print(f"{'='*width}")
         self._print_color("\n💡 Commands:", Fore.YELLOW)
-        print(f"  {Fore.CYAN}sendpeer <#> <message>{Fore.WHITE}  (sp) - Send message to peer by number")
-        print(f"  {Fore.CYAN}addpeer <#> [name]{Fore.WHITE}       (ap) - Add peer to contacts")
-        print(f"  {Fore.GREEN}★ = Already in contacts{Fore.WHITE}")
+        print(f"  sp <#> <msg> - Send to peer")
+        print(f"  ap <#> [name] - Add to contacts")
         print()
 
     def send_to_peer(self, peer_index, content, title=None):
