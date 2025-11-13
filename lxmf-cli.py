@@ -136,13 +136,21 @@ class LXMFClient:
         
         # Setup thread exception handler
         threading.excepthook = self.thread_exception_handler
-        
+                
         # Show info
-        print(f"\n{'='*60}")
+        import shutil
+        try:
+            width = shutil.get_terminal_size().columns
+        except:
+            width = 60
+
+        sep_width = min(width, 60)
+
+        print(f"\n{'='*sep_width}")
         self._print_color(f"Display Name: {self.display_name}", Fore.GREEN + Style.BRIGHT)
         self._print_color(f"LXMF Address: {RNS.prettyhexrep(self.destination.hash)}", Fore.CYAN)
         self._print_color(f"Auto-announce: Every {self.announce_interval} seconds", Fore.YELLOW)
-        print(f"{'='*60}\n")
+        print(f"{'='*sep_width}\n")
         
         # Initial announce
         self._print_color("Announcing to network...", Fore.CYAN)
@@ -407,15 +415,23 @@ class LXMFClient:
                 return
             except Exception as e:
                 self._print_warning(f"Error loading config: {e}")
-        
+                
         # === FIRST TIME SETUP ===
-        print(f"\n{'='*60}")
+        import shutil
+        try:
+            width = shutil.get_terminal_size().columns
+        except:
+            width = 60
+
+        sep_width = min(width, 60)
+
+        print(f"\n{'='*sep_width}")
         self._print_color("FIRST TIME SETUP", Fore.CYAN + Style.BRIGHT)
-        print(f"{'='*60}\n")
-        
+        print(f"{'='*sep_width}\n")
+
         self._print_color("Welcome to LXMF Client!", Fore.GREEN)
         print("Let's get you set up with a display name.\n")
-        
+      
         # Ask for display name
         while True:
             try:
@@ -453,9 +469,9 @@ class LXMFClient:
         
         self._print_success(f"Announce interval set to: {self.announce_interval}s")
         
-        print(f"\n{'='*60}")
+        print(f"\n{'='*sep_width}")
         self._print_color("Setup complete! Initializing...", Fore.GREEN)
-        print(f"{'='*60}\n")
+        print(f"{'='*sep_width}\n")
         
         # Save configuration
         self.save_config()
@@ -1983,12 +1999,20 @@ class LXMFClient:
     def clear_screen(self):
         """Clear the terminal screen"""
         import os
+        import shutil
+        
         # Windows
         if os.name == 'nt':
             os.system('cls')
         # Unix/Linux/Mac
         else:
             os.system('clear')
+        
+        # Get responsive width
+        try:
+            width = shutil.get_terminal_size().columns
+        except:
+            width = 60
         
         # Reprint the banner after clearing
         banner = """
@@ -1999,13 +2023,15 @@ class LXMFClient:
         ███████╗██╔╝ ██╗██║ ╚═╝ ██║██║     
         ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝╚═╝     
             Interactive LXMF Client
+        With Proper Display Name Support
     """
-        print("\n" + "="*60)
+        sep_width = min(width, 60)
+        print("\n" + "="*sep_width)
         if COLOR_ENABLED:
             print(Fore.WHITE + Style.BRIGHT + banner + Style.RESET_ALL)
         else:
             print(banner)
-        print("="*60 + "\n")
+        print("="*sep_width + "\n")
 
     def restart_client(self):
         """Restart the client"""
@@ -2287,6 +2313,8 @@ class LXMFClient:
 
 
 def main():
+    import shutil
+    
     banner = """
     ██╗     ██╗  ██╗███╗   ███╗███████╗
     ██║     ╚██╗██╔╝████╗ ████║██╔════╝
@@ -2294,20 +2322,26 @@ def main():
     ██║      ██╔██╗ ██║╚██╔╝██║██╔══╝  
     ███████╗██╔╝ ██╗██║ ╚═╝ ██║██║     
     ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝╚═╝     
+         Interactive LXMF Client
 """
-    print("\n" + "="*60)
+    
+    # Get responsive width
+    try:
+        width = shutil.get_terminal_size().columns
+    except:
+        width = 60
+    
+    sep_width = min(width, 60)
+    
+    print("\n" + "="*sep_width)
     if COLOR_ENABLED:
-        print(Fore.CYAN + Style.BRIGHT + banner)
-        print(Fore.WHITE + "        Interactive LXMF Client")
-        print(Style.RESET_ALL)
+        print(Fore.WHITE + Style.BRIGHT + banner + Style.RESET_ALL)
     else:
         print(banner)
-        print("         Interactive LXMF Client")
-    print("="*60 + "\n")
+    print("="*sep_width + "\n")
     
     client = LXMFClient()
     client.run()
-
 
 if __name__ == "__main__":
     main()
