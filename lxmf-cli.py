@@ -74,14 +74,43 @@ class LXMFClient:
         self.conversation_indices = {}
         self.next_conversation_index = 1
         self.conversations_file = os.path.join(storage_path, "conversations.json")
+
+        # Blacklist system
+        self.blacklist = set()  # Set of blocked destination hashes
+        self.blacklist_file = os.path.join(storage_path, "blacklist.json")
+
+        # Plugin system
+        self.plugins = {}
+        self.plugins_dir = os.path.join(storage_path, "plugins")
+        self.plugins_enabled = {}
+        self.plugins_config_file = os.path.join(storage_path, "plugins_config.json")
+        
+        # Stamp cost settings
+        self.stamp_cost = 0  # 0 = disabled
+        self.stamp_cost_enabled = False
+        self.ignore_invalid_stamps = True  # Reject messages with invalid stamps
         
         # Command aliases
         self.command_aliases = {
-            'h': 'help', 's': 'send', 'c': 'contacts', 'a': 'add',
-            'rm': 'remove', 're': 'reply', 'm': 'messages', 'addr': 'address',
-            'n': 'name', 'i': 'interval', 'ann': 'announce', 'q': 'quit', 'e': 'exit',
-            'p': 'peers', 'sp': 'sendpeer', 'ap': 'addpeer', 'da': 'discoverannounce',
-            'cls': 'clear', 'r': 'restart', 'st': 'stats', 'set': 'settings'
+            'h': 'help',
+            's': 'send',
+            're': 'reply',
+            'm': 'messages',
+            'c': 'contacts',
+            'a': 'add',
+            'rm': 'remove',
+            'p': 'peers',
+            'sp': 'sendpeer',
+            'ap': 'addpeer',
+            'st': 'stats',
+            'addr': 'address',
+            'n': 'name',
+            'i': 'interval',
+            'cls': 'clear',
+            'r': 'restart',
+            'q': 'quit',
+            'set': 'settings',
+            'bl': 'blacklist',
         }
         
         os.makedirs(storage_path, exist_ok=True)
@@ -122,6 +151,18 @@ class LXMFClient:
             self.identity, 
             display_name=self.display_name
         )
+
+        # Configure stamp cost on the destination
+        if self.stamp_cost_enabled and self.stamp_cost > 0:
+            try:
+                # Set the stamp cost directly on the destination
+                self.destination.stamp_cost = self.stamp_cost
+                self._print_success(f"Stamp cost configured: {self.stamp_cost} bits")
+                # Force an announce so the stamp cost is advertised
+                self.destination.announce()
+                self._print_success("Announced with stamp cost")
+            except Exception as e:
+                self._print_warning(f"Could not set stamp cost: {e}")
         
         # Register callbacks
         self.router.register_delivery_callback(self.on_message_received)
@@ -133,6 +174,10 @@ class LXMFClient:
         self.load_contacts()
         self.load_messages()
         self.load_conversation_indices()
+        self.load_blacklist()
+
+        # Load plugins
+        self.load_plugins()
         
         # Setup thread exception handler
         threading.excepthook = self.thread_exception_handler
@@ -150,9 +195,16 @@ class LXMFClient:
         self._print_color(f"Display Name: {self.display_name}", Fore.GREEN + Style.BRIGHT)
         self._print_color(f"LXMF Address: {RNS.prettyhexrep(self.destination.hash)}", Fore.CYAN)
         self._print_color(f"Auto-announce: Every {self.announce_interval} seconds", Fore.YELLOW)
+
+        # Show stamp cost status
+        if self.stamp_cost_enabled and self.stamp_cost > 0:
+            self._print_color(f"Stamp Cost: ENABLED ({self.stamp_cost} bits)", Fore.RED + Style.BRIGHT)
+        else:
+            self._print_color(f"Stamp Cost: DISABLED", Fore.WHITE)
+
         print(f"{'='*sep_width}\n")
         
-        # Initial announce
+        # Initial announce (this will now include stamp cost)
         self._print_color("Announcing to network...", Fore.CYAN)
         self.destination.announce()
         self._print_success("Initial announce complete")
@@ -163,6 +215,278 @@ class LXMFClient:
         
         self.router_thread = threading.Thread(target=self.router_job_loop, daemon=True)
         self.router_thread.start()
+
+    def resolve_contact_or_hash(self, target):
+        """
+        Resolve a contact name, number, or hash to a destination hash.
+        Returns normalized hash string or None if not found.
+        """
+        if not target:
+            return None
+        
+        # First, check if it's a direct hash (32 hex chars, possibly with colons/brackets)
+        clean_target = target.replace(":", "").replace(" ", "").replace("<", "").replace(">", "").lower()
+        if len(clean_target) == 64:  # Valid hash length
+            return clean_target
+        
+        # Try to parse as contact index number
+        try:
+            contact_idx = int(target)
+            # Search contacts by index
+            for name, data in self.contacts.items():
+                if data.get('index') == contact_idx:
+                    return data['hash'].replace(":", "").replace(" ", "").lower()
+            
+            # Search conversation indices
+            for hash_str, conv_idx in self.conversation_indices.items():
+                if conv_idx == contact_idx:
+                    return hash_str.replace(":", "").replace(" ", "").lower()
+            
+            # Search peers by index
+            with self.peers_lock:
+                for hash_str, peer_data in self.announced_peers.items():
+                    if peer_data.get('index') == contact_idx:
+                        return hash_str.replace(":", "").replace(" ", "").lower()
+            
+            return None
+        except ValueError:
+            # Not a number, treat as contact name
+            pass
+        
+        # Search by contact name
+        target_lower = target.lower()
+        for name, data in self.contacts.items():
+            if name.lower() == target_lower:
+                return data['hash'].replace(":", "").replace(" ", "").lower()
+        
+        # Search by display name in peers
+        with self.peers_lock:
+            for hash_str, peer_data in self.announced_peers.items():
+                display_name = peer_data.get('display_name', '')
+                if display_name.lower() == target_lower:
+                    return hash_str.replace(":", "").replace(" ", "").lower()
+        
+        return None
+
+    def load_plugins(self):
+        """Load all enabled plugins from plugins directory"""
+        import importlib.util
+        import sys
+        
+        if not os.path.exists(self.plugins_dir):
+            return
+        
+        # Load plugin configuration
+        if os.path.exists(self.plugins_config_file):
+            try:
+                with open(self.plugins_config_file, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                    self.plugins_enabled = config.get('enabled', {})
+            except Exception as e:
+                self._print_warning(f"Error loading plugin config: {e}")
+        
+        # Scan plugins directory
+        for filename in os.listdir(self.plugins_dir):
+            if filename.endswith('.py') and not filename.startswith('_'):
+                plugin_name = filename[:-3]
+                
+                # Check if plugin is enabled (default to enabled)
+                if not self.plugins_enabled.get(plugin_name, True):
+                    continue
+                
+                try:
+                    # Load the plugin module
+                    plugin_path = os.path.join(self.plugins_dir, filename)
+                    spec = importlib.util.spec_from_file_location(plugin_name, plugin_path)
+                    module = importlib.util.module_from_spec(spec)
+                    sys.modules[plugin_name] = module
+                    spec.loader.exec_module(module)
+                    
+                    # Get plugin class
+                    if hasattr(module, 'Plugin'):
+                        plugin_instance = module.Plugin(self)
+                        self.plugins[plugin_name] = plugin_instance
+                        self._print_success(f"Loaded plugin: {plugin_name}")
+                    else:
+                        self._print_warning(f"Plugin {plugin_name} has no Plugin class")
+                
+                except Exception as e:
+                    self._print_warning(f"Failed to load plugin {plugin_name}: {e}")
+
+    def save_plugins_config(self):
+        """Save plugin configuration"""
+        try:
+            config = {'enabled': self.plugins_enabled}
+            with open(self.plugins_config_file, 'w', encoding='utf-8') as f:
+                json.dump(config, f, indent=2)
+        except Exception as e:
+            self._print_warning(f"Error saving plugin config: {e}")
+
+    def handle_plugin_command(self, cmd, parts):
+        """Check if command should be handled by a plugin"""
+        for plugin_name, plugin in self.plugins.items():
+            if hasattr(plugin, 'commands') and cmd in plugin.commands:
+                try:
+                    plugin.handle_command(cmd, parts)
+                    return True
+                except Exception as e:
+                    self._print_error(f"Plugin {plugin_name} error: {e}")
+                    return True
+        return False
+
+    def handle_plugin_message(self, message, msg_data):
+        """Let plugins process incoming messages"""
+        for plugin_name, plugin in self.plugins.items():
+            try:
+                if hasattr(plugin, 'on_message'):
+                    # Plugin can return True to indicate it handled the message
+                    if plugin.on_message(message, msg_data):
+                        return True
+            except Exception as e:
+                self._print_warning(f"Plugin {plugin_name} message handler error: {e}")
+        return False
+
+    def list_plugins(self):
+        """List all available plugins"""
+        import shutil
+        try:
+            width = min(shutil.get_terminal_size().columns, 80)
+        except:
+            width = 80
+        
+        print(f"\n{'='*width}")
+        self._print_color("PLUGINS", Fore.CYAN + Style.BRIGHT)
+        print(f"{'='*width}")
+        
+        if not self.plugins:
+            print("\nNo plugins loaded")
+            print(f"Place plugin files in: {self.plugins_dir}\n")
+            return
+        
+        print(f"\n{'Plugin':<20} {'Status':<10} {'Description'}")
+        print(f"{'-'*20} {'-'*10} {'-'*30}")
+        
+        for plugin_name, plugin in self.plugins.items():
+            status = f"{Fore.GREEN}Enabled{Style.RESET_ALL}" if self.plugins_enabled.get(plugin_name, True) else f"{Fore.RED}Disabled{Style.RESET_ALL}"
+            description = getattr(plugin, 'description', 'No description')
+            print(f"{plugin_name:<20} {status:<20} {description}")
+        
+        print(f"{'='*width}")
+        self._print_color("\n💡 Commands:", Fore.YELLOW)
+        print("  plugin enable <name>  - Enable a plugin")
+        print("  plugin disable <name> - Disable a plugin")
+        print("  plugin reload         - Reload all plugins")
+        print()
+
+    def load_blacklist(self):
+        """Load blacklist from file"""
+        if os.path.exists(self.blacklist_file):
+            try:
+                with open(self.blacklist_file, 'r', encoding='utf-8') as f:
+                    blacklist_data = json.load(f)
+                    # Convert list to set and normalize hashes
+                    self.blacklist = set(hash_str.replace(":", "").replace(" ", "").lower() 
+                                    for hash_str in blacklist_data)
+                if self.blacklist:
+                    self._print_success(f"Loaded {len(self.blacklist)} blocked addresses")
+            except Exception as e:
+                self._print_warning(f"Error loading blacklist: {e}")
+
+    def save_blacklist(self):
+        """Save blacklist to file"""
+        try:
+            # Convert set to sorted list for JSON
+            blacklist_list = sorted(list(self.blacklist))
+            with open(self.blacklist_file, 'w', encoding='utf-8') as f:
+                json.dump(blacklist_list, f, indent=2)
+        except Exception as e:
+            self._print_warning(f"Error saving blacklist: {e}")
+
+    def is_blacklisted(self, destination_hash):
+        """Check if a destination hash is blacklisted"""
+        if not destination_hash:
+            return False
+        # Normalize the hash for comparison
+        normalized = destination_hash.replace(":", "").replace(" ", "").replace("<", "").replace(">", "").lower()
+        return normalized in self.blacklist
+
+    def add_to_blacklist(self, destination_hash):
+        """Add a destination hash to the blacklist"""
+        if not destination_hash:
+            self._print_error("Invalid destination hash")
+            return False
+        
+        # Normalize the hash
+        normalized = destination_hash.replace(":", "").replace(" ", "").replace("<", "").replace(">", "").lower()
+        
+        if normalized in self.blacklist:
+            self._print_warning("Already blacklisted")
+            return False
+        
+        self.blacklist.add(normalized)
+        self.save_blacklist()
+        return True
+
+    def remove_from_blacklist(self, destination_hash):
+        """Remove a destination hash from the blacklist"""
+        if not destination_hash:
+            self._print_error("Invalid destination hash")
+            return False
+        
+        # Normalize the hash
+        normalized = destination_hash.replace(":", "").replace(" ", "").replace("<", "").replace(">", "").lower()
+        
+        if normalized not in self.blacklist:
+            self._print_warning("Not in blacklist")
+            return False
+        
+        self.blacklist.remove(normalized)
+        self.save_blacklist()
+        return True
+
+    def list_blacklist(self):
+        """List all blacklisted addresses"""
+        import shutil
+        try:
+            width = min(shutil.get_terminal_size().columns, 80)
+        except:
+            width = 80
+        
+        if not self.blacklist:
+            print("\nNo blacklisted addresses\n")
+            return
+        
+        print(f"\n{'='*width}")
+        self._print_color("BLACKLIST", Fore.RED + Style.BRIGHT)
+        print(f"{'='*width}")
+        
+        # Sort for consistent display
+        sorted_blacklist = sorted(self.blacklist)
+        
+        print(f"\n{'#':<5} {'Hash':<32} {'Display Name'}")
+        print(f"{'-'*5} {'-'*32} {'-'*30}")
+        
+        for idx, hash_str in enumerate(sorted_blacklist, 1):
+            # Try to get display name for this hash
+            display_name = self.get_lxmf_display_name(hash_str)
+            contact_name = self.get_contact_name_by_hash(hash_str)
+            
+            if contact_name:
+                name_display = f"{contact_name} ({display_name})" if display_name else contact_name
+            elif display_name:
+                name_display = display_name
+            else:
+                name_display = "<unknown>"
+            
+            # Truncate if too long
+            if len(name_display) > 30:
+                name_display = name_display[:27] + "..."
+            
+            print(f"{idx:<5} {hash_str[:32]:<32} {name_display}")
+        
+        print(f"{'='*width}")
+        self._print_color(f"\n💡 Total blocked: {len(self.blacklist)}", Fore.YELLOW)
+        print()
 
     def get_terminal_width(self, default=70, max_width=90):
         """Get terminal width with safe defaults for mobile"""
@@ -412,6 +736,10 @@ class LXMFClient:
                     self.notify_sound = config.get('notify_sound', True)
                     self.notify_bell = config.get('notify_bell', True)
                     self.notify_visual = config.get('notify_visual', True)
+                    # Load stamp cost settings
+                    self.stamp_cost_enabled = config.get('stamp_cost_enabled', False)
+                    self.stamp_cost = config.get('stamp_cost', 0)
+                    self.ignore_invalid_stamps = config.get('ignore_invalid_stamps', False)
                 return
             except Exception as e:
                 self._print_warning(f"Error loading config: {e}")
@@ -485,7 +813,10 @@ class LXMFClient:
                 'show_announces': self.show_announces,
                 'notify_sound': self.notify_sound,
                 'notify_bell': self.notify_bell,
-                'notify_visual': self.notify_visual
+                'notify_visual': self.notify_visual,
+                'stamp_cost_enabled': self.stamp_cost_enabled,
+                'stamp_cost': self.stamp_cost,
+                'ignore_invalid_stamps': self.ignore_invalid_stamps
             }
             with open(self.config_file, 'w', encoding='utf-8') as f:
                 json.dump(config, f, indent=2)
@@ -561,10 +892,62 @@ class LXMFClient:
             pass
         
         return None
-            
+                    
     def on_message_received(self, message):
         """Callback when message is received"""
         try:
+            source_hash_str = RNS.prettyhexrep(message.source_hash)
+            
+            # CHECK BLACKLIST FIRST (before any processing)
+            if self.is_blacklisted(source_hash_str):
+                # Silently drop the message
+                print(f"\n[BLOCKED] Message from blacklisted address: {source_hash_str}")
+                sender_display = self.get_lxmf_display_name(source_hash_str)
+                if sender_display:
+                    print(f"          Display name: {sender_display}")
+                print("> ", end="", flush=True)
+                return
+            
+            # Validate stamp cost if enabled
+            if self.stamp_cost_enabled and self.stamp_cost > 0:
+                print(f"\n[DEBUG] Stamp validation active: required={self.stamp_cost} bits")
+                
+                try:
+                    if hasattr(message, 'validate_stamp'):
+                        print(f"[DEBUG] Message stamp_cost: {getattr(message, 'stamp_cost', 'N/A')}")
+                        print(f"[DEBUG] Message stamp_value: {getattr(message, 'stamp_value', 'N/A')}")
+                        print(f"[DEBUG] Message stamp_valid: {getattr(message, 'stamp_valid', 'N/A')}")
+                        
+                        # Validate the stamp with our required cost
+                        is_valid = message.validate_stamp(self.stamp_cost)
+                        print(f"[DEBUG] Stamp validation result: {is_valid}")
+                        
+                        if not is_valid:
+                            # Check if we should ignore invalid stamps
+                            if self.ignore_invalid_stamps:
+                                # Check if the message has ANY stamp at all
+                                has_stamp = message.stamp_value is not None
+                                
+                                if has_stamp:
+                                    # Message has a stamp but it's insufficient - REJECT
+                                    source_hash_str = RNS.prettyhexrep(message.source_hash)
+                                    sender_display = self.get_lxmf_display_name(source_hash_str)
+                                    self._print_warning(f"Rejected message from {sender_display or source_hash_str}: insufficient stamp")
+                                    self._print_warning(f"  Required: {self.stamp_cost} bits, Got: {message.stamp_value or 0}")
+                                    return
+                                else:
+                                    # Message has no stamp at all - sender's client doesn't support it
+                                    print(f"[DEBUG] Message has no stamp (old client), allowing through")
+                                    self._print_warning("⚠ Received unstamped message (sender using old client)")
+                            else:
+                                # Not ignoring invalid stamps - ALLOW the message but warn
+                                print(f"[DEBUG] Invalid stamp but ignore_invalid_stamps is OFF, allowing message")
+                                self._print_warning("⚠ Received message with invalid/insufficient stamp (allowed by settings)")
+                except Exception as e:
+                    print(f"[DEBUG] Stamp validation exception: {e}")
+                    import traceback
+                    traceback.print_exc()
+            
             content = message.content
             if isinstance(content, bytes):
                 content = content.decode('utf-8', errors='replace')
@@ -586,6 +969,11 @@ class LXMFClient:
                 'direction': 'inbound',
                 'display_name': sender_display_name
             }
+            
+            # Let plugins handle the message first
+            if self.handle_plugin_message(message, msg_data):
+                # Plugin handled it, don't show notification
+                return
             
             with self.messages_lock:
                 self.messages.append(msg_data)
@@ -1200,6 +1588,20 @@ class LXMFClient:
         print(f"\n{Fore.CYAN}Network:{Style.RESET_ALL}")
         print(f"  Auto-announce: Every {self.announce_interval}s")
         print(f"  Discovery alerts: {'ON' if self.show_announces else 'OFF'}")
+                
+        # Security settings
+        print(f"\n{Fore.RED}Security:{Style.RESET_ALL}")
+        if self.stamp_cost_enabled and self.stamp_cost > 0:
+            print(f"  Stamp Cost: {Fore.GREEN}ENABLED{Style.RESET_ALL}")
+            print(f"  Required Proof: {Fore.YELLOW}{self.stamp_cost} bits{Style.RESET_ALL}")
+            print(f"  Ignore Invalid: {Fore.GREEN}{'YES' if self.ignore_invalid_stamps else 'NO'}{Style.RESET_ALL}")
+        else:
+            print(f"  Stamp Cost: {Fore.RED}DISABLED{Style.RESET_ALL}")
+
+        if self.blacklist:
+            print(f"  Blacklist: {Fore.YELLOW}{len(self.blacklist)} blocked{Style.RESET_ALL}")
+        else:
+            print(f"  Blacklist: {Fore.GREEN}Empty{Style.RESET_ALL}")
         
         # Notification settings
         print(f"\n{Fore.MAGENTA}Notifications:{Style.RESET_ALL}")
@@ -1223,13 +1625,20 @@ class LXMFClient:
         print(f"  Announced peers: {peer_count}")
         print(f"  Total messages: {total_messages} (↑{sent} ↓{received})")
         
+        # Plugins
+        if self.plugins:
+            plugin_count = len(self.plugins)
+            enabled_count = sum(1 for name in self.plugins.keys() if self.plugins_enabled.get(name, True))
+            print(f"  Plugins: {enabled_count}/{plugin_count} enabled")
+        
         # System info
-        print(f"\n{Fore.RED}System:{Style.RESET_ALL}")
+        print(f"\n{Fore.WHITE}System:{Style.RESET_ALL}")
         uptime = time.time() - self.start_time
         hours = int(uptime // 3600)
         minutes = int((uptime % 3600) // 60)
         print(f"  Uptime: {hours}h {minutes}m")
-        print(f"  Suppressed errors: {self.suppressed_errors}")
+        if self.suppressed_errors > 0:
+            print(f"  Suppressed errors: {self.suppressed_errors}")
         
         print(f"{'='*width}\n")
 
@@ -1537,11 +1946,26 @@ class LXMFClient:
                         print(f"{Fore.CYAN}{cmd}{Style.RESET_ALL} {Fore.YELLOW}({alias}){Style.RESET_ALL}")
                     else:
                         print(f"{Fore.CYAN}{cmd}{Style.RESET_ALL}")
-                
+
+                # Mobile security 
+                print(f"\n{Fore.RED}🛡️  SECURITY{Style.RESET_ALL}")
+                print(f"{'-'*width}")
+                commands = [
+                    ("blacklist [list]", "bl"),
+                    ("block <#/name>", ""),
+                    ("unblock <#/name>", ""),
+                ]
+                for cmd, alias in commands:
+                    if alias:
+                        print(f"{Fore.CYAN}{cmd}{Style.RESET_ALL} {Fore.YELLOW}({alias}){Style.RESET_ALL}")
+                    else:
+                        print(f"{Fore.CYAN}{cmd}{Style.RESET_ALL}")
+                                
                 # System
                 print(f"\n{Fore.RED}🖥️  SYSTEM{Style.RESET_ALL}")
                 print(f"{'-'*width}")
                 commands = [
+                    ("plugin [list]", ""),
                     ("clear", "cls"),
                     ("restart", "r"),
                     ("help", "h"),
@@ -1552,8 +1976,6 @@ class LXMFClient:
                         print(f"{Fore.CYAN}{cmd}{Style.RESET_ALL} {Fore.YELLOW}({alias}){Style.RESET_ALL}")
                     else:
                         print(f"{Fore.CYAN}{cmd}{Style.RESET_ALL}")
-                
-                print(f"\n{Fore.YELLOW}💡 'settings' for options{Style.RESET_ALL}\n")
             
             else:
                 # === DESKTOP LAYOUT (clean separator lines) ===
@@ -1621,11 +2043,26 @@ class LXMFClient:
                         print(f"{Fore.CYAN}{long_cmd:<20}{Style.RESET_ALL} {Fore.YELLOW}({short_cmd:<3}){Style.RESET_ALL} {description}")
                     else:
                         print(f"{Fore.CYAN}{long_cmd:<20}{Style.RESET_ALL}      {description}")
-                
+
+                # Security section in help menu (desktop version)
+                print(f"\n{Fore.RED}🛡️  SECURITY{Style.RESET_ALL}")
+                print(f"{'-'*70}")
+                commands = [
+                    ("blacklist [list]", "bl", "Manage blacklist"),
+                    ("block <#/name>", "", "Block contact"),
+                    ("unblock <#/name>", "", "Unblock contact"),
+                ]
+                for long_cmd, short_cmd, description in commands:
+                    if short_cmd:
+                        print(f"{Fore.CYAN}{long_cmd:<20}{Style.RESET_ALL} {Fore.YELLOW}({short_cmd:<3}){Style.RESET_ALL} {description}")
+                    else:
+                        print(f"{Fore.CYAN}{long_cmd:<20}{Style.RESET_ALL}      {description}")
+                                
                 # System
                 print(f"\n{Fore.RED}🖥️  SYSTEM{Style.RESET_ALL}")
                 print(f"{'-'*70}")
                 commands = [
+                    ("plugin [list]", "", "Manage plugins"),
                     ("clear", "cls", "Clear screen"),
                     ("restart", "r", "Restart client"),
                     ("help", "h", "Show help"),
@@ -1670,8 +2107,14 @@ class LXMFClient:
             print(f"  [5] Terminal Bell: {Fore.GREEN}{'ON' if self.notify_bell else 'OFF'}{Style.RESET_ALL}")
             print(f"  [6] Visual Flash: {Fore.GREEN}{'ON' if self.notify_visual else 'OFF'}{Style.RESET_ALL}")
             
+            print(f"\n{Fore.RED}Security Settings:{Style.RESET_ALL}")
+            print(f"  [7] Stamp Cost: {Fore.GREEN}{'ON' if self.stamp_cost_enabled else 'OFF'}{Style.RESET_ALL}")
+            if self.stamp_cost_enabled:
+                print(f"      Amount: {Fore.YELLOW}{self.stamp_cost} bits{Style.RESET_ALL}")
+            print(f"  [8] Ignore Invalid Stamps: {Fore.GREEN}{'ON' if self.ignore_invalid_stamps else 'OFF'}{Style.RESET_ALL}")
+            
             print(f"\n{Fore.YELLOW}Options:{Style.RESET_ALL}")
-            print("  [1-6] - Change setting")
+            print("  [1-8] - Change setting")
             print("  [t]   - Test notification")
             print("  [b]   - Back to main menu")
             print("  [s]   - Save and exit")
@@ -1679,7 +2122,7 @@ class LXMFClient:
             print(f"{'='*width}")
             
             choice = input("\nSelect option: ").strip().lower()
-            
+                                    
             if choice == '1':
                 new_name = input(f"\nEnter new display name [{self.display_name}]: ").strip()
                 if new_name:
@@ -1743,6 +2186,61 @@ class LXMFClient:
                 self.save_config()
                 status = "enabled" if self.notify_visual else "disabled"
                 self._print_success(f"Visual flash {status}")
+
+            elif choice == '7':
+                # Toggle stamp cost
+                if not self.stamp_cost_enabled:
+                    # Enabling - ask for amount
+                    print("\n" + "="*width)
+                    print("Stamp Cost Protection")
+                    print("="*width)
+                    print("This requires senders to perform computational work")
+                    print("before delivering messages, helping prevent spam.")
+                    print("\nRecommended values:")
+                    print("  Low protection:    1-5")
+                    print("  Medium protection: 6-15")
+                    print("  High protection:   16-32")
+                    print("\nWarning: Higher values may make it difficult for")
+                    print("legitimate users to send you messages.")
+                    
+                    try:
+                        cost_str = input(f"\nEnter stamp cost [0-32]: ").strip()
+                        if cost_str:
+                            cost = int(cost_str)
+                            if 0 <= cost <= 32:
+                                self.stamp_cost = cost
+                                self.stamp_cost_enabled = True
+                                self.destination.stamp_cost = self.stamp_cost
+                                self.save_config()
+                                self.destination.announce()
+                                self._print_success(f"Stamp cost enabled: {self.stamp_cost}")
+                                self._print_success("Announced to network")
+                            else:
+                                self._print_error("Value must be between 0 and 32")
+                        else:
+                            print("Cancelled")
+                    except ValueError:
+                        self._print_error("Invalid number")
+                else:
+                    # Disabling
+                    self.stamp_cost_enabled = False
+                    self.stamp_cost = 0
+                    self.destination.stamp_cost = 0
+                    self.save_config()
+                    self.destination.announce()
+                    self._print_success("Stamp cost disabled")
+                    self._print_success("Announced to network")
+            
+            elif choice == '8':
+                # Toggle ignore invalid stamps
+                self.ignore_invalid_stamps = not self.ignore_invalid_stamps
+                self.save_config()
+                status = "enabled" if self.ignore_invalid_stamps else "disabled"
+                self._print_success(f"Ignore invalid stamps {status}")
+                if self.ignore_invalid_stamps:
+                    print("  Messages with insufficient/invalid stamps will be rejected")
+                else:
+                    print("  Messages with insufficient/invalid stamps will be accepted")
             
             elif choice == 't':
                 # Test notification
@@ -2279,6 +2777,75 @@ class LXMFClient:
                             else:
                                 self._print_error("Use 'on' or 'off'")
 
+                    elif cmd == 'blacklist':
+                        if len(parts) < 2:
+                            self.list_blacklist()
+                        else:
+                            subcmd = parts[1].lower()
+                            if subcmd == 'list':
+                                self.list_blacklist()
+                            elif subcmd == 'add' and len(parts) >= 3:
+                                target = ' '.join(parts[2:])
+                                # Try to resolve contact name or index to hash
+                                dest_hash = self.resolve_contact_or_hash(target)
+                                if dest_hash:
+                                    if self.add_to_blacklist(dest_hash):
+                                        contact_display = self.format_contact_display_short(dest_hash)
+                                        self._print_success(f"Blacklisted: {contact_display}")
+                                else:
+                                    self._print_error(f"Unknown contact or invalid hash: {target}")
+                            elif subcmd == 'remove' and len(parts) >= 3:
+                                target = ' '.join(parts[2:])
+                                # Try to resolve contact name or index to hash
+                                dest_hash = self.resolve_contact_or_hash(target)
+                                if dest_hash:
+                                    if self.remove_from_blacklist(dest_hash):
+                                        contact_display = self.format_contact_display_short(dest_hash)
+                                        self._print_success(f"Unblocked: {contact_display}")
+                                else:
+                                    self._print_error(f"Unknown contact or invalid hash: {target}")
+                            elif subcmd == 'clear':
+                                confirm = input("Clear entire blacklist? [y/N]: ").strip().lower()
+                                if confirm == 'y':
+                                    count = len(self.blacklist)
+                                    self.blacklist.clear()
+                                    self.save_blacklist()
+                                    self._print_success(f"Cleared {count} entries from blacklist")
+                                else:
+                                    print("Cancelled")
+                            else:
+                                print("Usage:")
+                                print("  blacklist [list]        - Show blacklist")
+                                print("  blacklist add <#/name>  - Block contact/peer")
+                                print("  blacklist remove <#/name> - Unblock")
+                                print("  blacklist clear         - Clear all")
+
+                    elif cmd == 'block':
+                        if len(parts) < 2:
+                            print("Usage: block <contact_#/name/hash>")
+                        else:
+                            target = ' '.join(parts[1:])
+                            dest_hash = self.resolve_contact_or_hash(target)
+                            if dest_hash:
+                                if self.add_to_blacklist(dest_hash):
+                                    contact_display = self.format_contact_display_short(dest_hash)
+                                    self._print_success(f"Blocked: {contact_display}")
+                            else:
+                                self._print_error(f"Unknown contact: {target}")
+
+                    elif cmd == 'unblock':
+                        if len(parts) < 2:
+                            print("Usage: unblock <contact_#/name/hash>")
+                        else:
+                            target = ' '.join(parts[1:])
+                            dest_hash = self.resolve_contact_or_hash(target)
+                            if dest_hash:
+                                if self.remove_from_blacklist(dest_hash):
+                                    contact_display = self.format_contact_display_short(dest_hash)
+                                    self._print_success(f"Unblocked: {contact_display}")
+                            else:
+                                self._print_error(f"Unknown contact: {target}")
+
                     elif cmd == 'clear':
                         self.clear_screen()
 
@@ -2286,7 +2853,32 @@ class LXMFClient:
                         self.restart_client()
                         # Note: execution will not continue past this point
                         break
-                    
+                    elif cmd == 'plugin':
+                        if len(parts) < 2:
+                            self.list_plugins()
+                        else:
+                            subcmd = parts[1].lower()
+                            if subcmd == 'list':
+                                self.list_plugins()
+                            elif subcmd == 'enable' and len(parts) >= 3:
+                                plugin_name = parts[2]
+                                self.plugins_enabled[plugin_name] = True
+                                self.save_plugins_config()
+                                self._print_success(f"Plugin {plugin_name} enabled")
+                                self._print_warning("Use 'plugin reload' to activate")
+                            elif subcmd == 'disable' and len(parts) >= 3:
+                                plugin_name = parts[2]
+                                self.plugins_enabled[plugin_name] = False
+                                self.save_plugins_config()
+                                self._print_success(f"Plugin {plugin_name} disabled")
+                                self._print_warning("Use 'plugin reload' to deactivate")
+                            elif subcmd == 'reload':
+                                self.plugins = {}
+                                self.load_plugins()
+                                self._print_success("Plugins reloaded")
+                            else:
+                                print("Usage: plugin [list|enable|disable|reload]")
+
                     elif cmd == 'debug':
                         print(f"\n=== Debug Info ===")
                         print(f"Suppressed file errors: {self.suppressed_errors}")
@@ -2295,11 +2887,13 @@ class LXMFClient:
                         print(f"Announced peers: {len(self.announced_peers)}")
                         print(f"Cached display names: {len(self.display_name_cache)}")
                         print()
-                    
+
                     else:
-                        print(f"Unknown command: {cmd}")
-                        print("Type 'help' or 'h' for commands")
-                
+                        # Check if a plugin wants to handle this command
+                        if not self.handle_plugin_command(cmd, parts):
+                            print(f"Unknown command: {cmd}")
+                            print("Type 'help' or 'h' for commands")
+               
                 except EOFError:
                     break
                 except KeyboardInterrupt:
