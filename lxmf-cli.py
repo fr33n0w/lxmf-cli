@@ -2458,6 +2458,29 @@ class LXMFClient:
                             print("\a", end="", flush=True)
                             time.sleep(0.1)
                 
+                elif system == 'Darwin':
+                    # macOS: attempt system sound, fallback to terminal bell
+                    try:
+                        if self.notify_sound:
+                            import subprocess
+                            sound_candidates = [
+                                "/System/Library/Sounds/Ping.aiff",
+                                "/System/Library/Sounds/Glass.aiff",
+                                "/System/Library/Sounds/Submarine.aiff"
+                            ]
+                            sound_path = next((p for p in sound_candidates if os.path.exists(p)), None)
+                            if sound_path:
+                                subprocess.Popen(["afplay", sound_path])
+                            else:
+                                subprocess.run(["osascript", "-e", "beep"], check=False)
+                        if self.notify_bell:
+                            for _ in range(2):
+                                print("\a", end="", flush=True)
+                                time.sleep(0.12)
+                    except Exception:
+                        if self.notify_bell:
+                            print("\a", end="", flush=True)
+                    time.sleep(0.05)
                 elif system == 'Linux':
                     # Linux notifications
                     if self.notify_sound:
@@ -2476,7 +2499,7 @@ class LXMFClient:
                             time.sleep(0.15)
                 
                 else:
-                    # Generic/macOS - terminal bell only
+                    # Other/unknown systems - terminal bell only
                     if self.notify_bell:
                         for _ in range(3):
                             print("\a", end="", flush=True)
