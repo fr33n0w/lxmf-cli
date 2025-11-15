@@ -117,6 +117,9 @@ class LXMFClient:
             'ann': 'announce',
         }
         
+        self.Fore = Fore
+        self.Style = Style
+
         os.makedirs(storage_path, exist_ok=True)
         os.makedirs(self.messages_path, exist_ok=True)
         
