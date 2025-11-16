@@ -2561,7 +2561,7 @@ class LXMFClient:
                         try:
                             # Try to play custom sound first
                             if sound_file:
-                                os.system(f'termux-media-player play "{sound_file}" 2>/dev/null &')
+                                os.system(f'termux-media-player play "{sound_file}" >/dev/null 2>&1 &')
                                 time.sleep(0.5)
                             else:
                                 # Vibration pattern fallback
