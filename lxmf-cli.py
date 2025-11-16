@@ -16,6 +16,7 @@ import traceback
 import itertools
 import subprocess
 import sys
+import platform
 from prompt_toolkit import PromptSession
 from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.formatted_text import HTML 
@@ -761,7 +762,7 @@ class LXMFClient:
             if not self.stop_event.is_set() and self.auto_announce_enabled:
                 if hasattr(self.destination, 'announce'):
                     try:
-                        self.destination.announce()
+                        self.destination.announce()  # type: ignore
                         timestamp = datetime.now().strftime('%H:%M:%S')
                         print(f"\n[Auto-announced at {timestamp}]")
                     except Exception as e:
