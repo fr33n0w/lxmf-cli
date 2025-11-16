@@ -637,7 +637,7 @@ class LXMFClient:
                                 
                                 # Use plain text - no ANSI codes in background threads
                                 print(f"\n📡 New Announce: {display_name}")
-                                print(f"▶ {hash_str}")
+                                print(f"🔗 {hash_str}")
                                 
                                 if not is_contact:
                                     # Get peer index for this new peer
