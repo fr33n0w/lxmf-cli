@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-Terminal-Based Interactive LXMF Messaging Client
-
+Terminal-Based Interactive LXMF Messaging Client With Extensible Plugin System
 """
 
 import RNS
@@ -2946,14 +2945,32 @@ class LXMFClient:
     def _handle_remove_command(self, parts):
         """Handle remove contact command"""
         if len(parts) < 2:
-            print("💡 Usage: remove <name>")
+            print("💡 Usage: remove <name|index>")
         else:
-            if parts[1] in self.contacts:
-                del self.contacts[parts[1]]
+            target = parts[1]
+
+            # Try to remove by index first
+            if target.isdigit():
+                index = int(target)
+                found = None
+                for name, data in self.contacts.items():
+                    if data.get('index') == index:
+                        found = name
+                        break
+
+                if found:
+                    del self.contacts[found]
+                    self.save_contacts()
+                    self._print_success(f"Removed: {found} (#{index})")
+                else:
+                    self._print_error(f"Contact #{index} not found")
+            # Otherwise try to remove by name
+            elif target in self.contacts:
+                del self.contacts[target]
                 self.save_contacts()
-                self._print_success(f"Removed: {parts[1]}")
+                self._print_success(f"Removed: {target}")
             else:
-                self._print_error(f"Not found: {parts[1]}")
+                self._print_error(f"Not found: {target}")
     
     def _handle_reply_command(self, parts):
         """Handle reply command"""
