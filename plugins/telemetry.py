@@ -862,16 +862,18 @@ class Plugin:
         """Background thread that sends telemetry to collector at intervals"""
         print("Collector: Background loop started")
 
-        while self.collector_running:
+        while self.collector_running and self.config.get('collector_enabled', False):
             try:
                 # Check if enough time has passed since last send
                 current_time = time.time()
                 interval = self.config.get('collector_interval', 3600)
 
                 if current_time - self.last_collector_send >= interval:
-                    # Send telemetry to collector
-                    self._send_to_collector()
-                    self.last_collector_send = current_time
+                    # Double-check that collector is still enabled before sending
+                    if self.config.get('collector_enabled', False):
+                        # Send telemetry to collector
+                        self._send_to_collector()
+                        self.last_collector_send = current_time
 
                 # Sleep for a short time before checking again
                 time.sleep(10)  # Check every 10 seconds
@@ -885,6 +887,10 @@ class Plugin:
     def _send_to_collector(self):
         """Send telemetry to the configured collector"""
         try:
+            # Check if collector is still enabled
+            if not self.config.get('collector_enabled', False):
+                return
+
             collector_address = self.config.get('collector_address')
             if not collector_address:
                 return
