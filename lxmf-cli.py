@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Terminal-Based Interactive LXMF Messaging Client With Extensible Plugin System
+Terminal-Based Interactive LXMF Messaging Client
+
 """
 
 import RNS
@@ -1459,8 +1460,15 @@ class LXMFClient:
         self._print_color("\n💡 sp <#> <msg> | ap <#> [name]", Fore.YELLOW)
         print()
 
-    def send_message(self, recipient, content, title=None):
-        """Send a message with optimized processing"""
+    def send_message(self, recipient, content, title=None, fields=None):
+        """Send a message with optimized processing
+
+        Args:
+            recipient: Contact name, index, or hash
+            content: Message content
+            title: Optional message title
+            fields: Optional dict of LXMF fields (e.g., {LXMF.FIELD_TELEMETRY: data})
+        """
         try:
             send_start_time = time.time()
 
@@ -1527,6 +1535,13 @@ class LXMFClient:
                 title=title or "",
                 desired_method=LXMF.LXMessage.DIRECT
             )
+
+            # Add custom LXMF fields if provided
+            if fields:
+                if not hasattr(message, 'fields'):
+                    message.fields = {}
+                message.fields.update(fields)
+
             # Add custom attribute for tracking
             setattr(message, 'send_timestamp', send_start_time)
             message.register_delivery_callback(self.on_delivery)
