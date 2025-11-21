@@ -3,8 +3,9 @@ Echo Bot Plugin for LXMF-CLI
 Automatically replies to messages with "Echo: <message>"
 Can be toggled on/off with the 'echo' command
 """
-
 import time
+import sys
+import os
 
 class Plugin:
     def __init__(self, client):
@@ -49,8 +50,24 @@ class Plugin:
             # Small delay to seem more natural
             time.sleep(0.5)
             
-            # Send the reply
-            self.client.send_message(source_hash, reply_text)
+            # Suppress ALL output from send_message
+            old_stdout = sys.stdout
+            old_stderr = sys.stderr
+            
+            try:
+                # Redirect to devnull
+                devnull = open(os.devnull, 'w', encoding='utf-8', errors='ignore')
+                sys.stdout = devnull
+                sys.stderr = devnull
+                
+                # Send the reply
+                self.client.send_message(source_hash, reply_text)
+                
+            finally:
+                # Restore output streams
+                devnull.close()
+                sys.stdout = old_stdout
+                sys.stderr = old_stderr
             
             # Show in console that we echoed
             sender_display = self.client.format_contact_display_short(source_hash)
@@ -58,7 +75,9 @@ class Plugin:
             print("> ", end="", flush=True)
             
         except Exception as e:
-            print(f"\n[ECHO BOT ERROR] Failed to send echo: {e}")
+            # Safe error printing
+            error_msg = str(e).encode('ascii', errors='ignore').decode('ascii')
+            print(f"\n[ECHO BOT ERROR] Failed to send echo: {error_msg}")
             print("> ", end="", flush=True)
         
         # Return False to allow normal notification to occur
@@ -87,12 +106,11 @@ class Plugin:
                 
                 if subcmd in ['on', 'enable', 'start']:
                     self.enabled = True
-                    self.client._print_success("Echo Bot ENABLED - will auto-reply to all messages")
+                    print("✓ Echo Bot ENABLED - will auto-reply to all messages")
                     print("💡 Tip: Use 'echo off' to disable")
-                
                 elif subcmd in ['off', 'disable', 'stop']:
                     self.enabled = False
-                    self.client._print_success("Echo Bot DISABLED - normal operation")
+                    print("✓ Echo Bot DISABLED - normal operation")
                 
                 elif subcmd in ['status', 'info']:
                     status = "ENABLED ✓" if self.enabled else "DISABLED ✗"
