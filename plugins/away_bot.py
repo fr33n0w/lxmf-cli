@@ -3,6 +3,8 @@ Away Bot Plugin for LXMF-CLI
 Automatically reply when you're away from keyboard
 """
 import time
+import sys
+import os
 
 class Plugin:
     def __init__(self, client):
@@ -29,7 +31,7 @@ class Plugin:
         if self.client.is_blacklisted(source_hash):
             return False
         
-        # Send away message
+        # Send away message silently
         try:
             time.sleep(0.5)
             away_duration = ""
@@ -38,15 +40,38 @@ class Plugin:
                 if minutes > 0:
                     away_duration = f" (away for {minutes} min)"
             
+            # Keep emoji in the actual LXMF message
             reply = f"🚫 {self.away_message}{away_duration}"
-            self.client.send_message(source_hash, reply)
+            
+            # Suppress ALL output from send_message
+            old_stdout = sys.stdout
+            old_stderr = sys.stderr
+            
+            try:
+                # Redirect to devnull
+                devnull = open(os.devnull, 'w', encoding='utf-8', errors='ignore')
+                sys.stdout = devnull
+                sys.stderr = devnull
+                
+                self.client.send_message(source_hash, reply)
+                
+            finally:
+                # Restore output streams
+                devnull.close()
+                sys.stdout = old_stdout
+                sys.stderr = old_stderr
+            
             self.replied_to.add(source_hash)
             
             sender = self.client.format_contact_display_short(source_hash)
+            # Use safe print for console output (no emoji here)
             print(f"\n[AWAY BOT] Auto-replied to {sender}")
             print("> ", end="", flush=True)
+            
         except Exception as e:
-            print(f"\n[AWAY BOT ERROR] {e}")
+            # Safe error printing
+            error_msg = str(e).encode('ascii', errors='ignore').decode('ascii')
+            print(f"\n[AWAY BOT ERROR] {error_msg}")
             print("> ", end="", flush=True)
         
         return False
@@ -60,16 +85,15 @@ class Plugin:
             self.is_away = True
             self.away_since = time.time()
             self.replied_to.clear()
-            self.client._print_success("Away mode ENABLED")
+            print("✓ Away mode ENABLED")
             print(f"Away message: {self.away_message}")
             print("💡 Use 'back' to disable")
-        
         elif cmd == 'back':
             if self.is_away:
                 away_time = int((time.time() - self.away_since) / 60) if self.away_since else 0
                 self.is_away = False
                 self.away_since = None
                 self.replied_to.clear()
-                self.client._print_success(f"Welcome back! (was away for {away_time} min)")
+                print(f"✓ Welcome back! (was away for {away_time} min)")
             else:
-                print("You weren't away")
+                print("ℹ️  You weren't away")
