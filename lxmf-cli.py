@@ -251,8 +251,14 @@ class LXMFClient:
         
         # First, check if it's a direct hash (32 hex chars, possibly with colons/brackets)
         clean_target = target.replace(":", "").replace(" ", "").replace("<", "").replace(">", "").lower()
-        if len(clean_target) == 64:  # Valid hash length
-            return clean_target
+        if len(clean_target) == 32:  # Valid hash length (16 bytes = 32 hex chars)
+            # Validate it's actually hex
+            try:
+                bytes.fromhex(clean_target)
+                return clean_target
+            except ValueError:
+                # Not valid hex, continue to other resolution methods
+                pass
         
         # Try to parse as contact index number
         try:
@@ -1243,7 +1249,7 @@ class LXMFClient:
             if hash_input:
                 # Validate hash
                 clean_hash = hash_input.replace(":", "").replace(" ", "").replace("<", "").replace(">", "")
-                if len(clean_hash) == 64:
+                if len(clean_hash) == 32:
                     try:
                         bytes.fromhex(clean_hash)
                         new_hash = clean_hash
@@ -1251,7 +1257,7 @@ class LXMFClient:
                         self._print_error("Invalid hash format!")
                         return
                 else:
-                    self._print_error("Hash must be 64 hex characters!")
+                    self._print_error("Hash must be 32 hex characters!")
                     return
         
         if choice == 'c':
