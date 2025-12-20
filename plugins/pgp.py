@@ -158,47 +158,100 @@ class Plugin:
             
             print(f"Using GPG version: {gpg_version}")
             
-            # Generate key with batch mode (fixes Termux pinentry issues)
-            key_input = self.gpg.gen_key_input(
-                name_real=name,
-                name_email=email,
-                key_type='RSA',
-                key_length=2048,
-                expire_date=0,  # Never expire
-                passphrase=''   # No passphrase (batch mode)
-            )
+            # Use quick-gen-key for batch mode (Termux compatible)
+            # This bypasses the interactive prompts entirely
+            import subprocess
             
             print("Key input parameters generated")
             print("Starting key generation (please wait, this can take 30-60 seconds on mobile)...")
             print("TIP: Move your device around to help generate randomness!")
             
-            # Use batch mode to avoid pinentry issues on Termux
-            key = self.gpg.gen_key(key_input)
+            # Build the user ID
+            user_id = f"{name} <{email}>"
             
-            print(f"\nKey generation completed. Result type: {type(key)}")
-            print(f"Key value: {key}")
-            print(f"Key as string: '{str(key)}'")
-            print(f"Key is truthy: {bool(key)}")
-            
-            if key and str(key) and str(key).strip():
-                self.my_key_id = str(key)
-                self.save_config()
-                self._print_success("PGP key pair generated!")
-                self._print_success(f"Key ID: {self.my_key_id}")
-                print("\n" + "─"*60 + "\n")
-            else:
-                self._print_error("Failed to generate key")
-                # Show error details
-                print(f"\nDebug - Key object details:")
-                print(f"  Type: {type(key)}")
-                print(f"  Status: {getattr(key, 'status', 'unknown')}")
-                if hasattr(key, 'stderr'):
-                    print(f"  Error output:\n{key.stderr}")
+            # Try using gpg command directly with --quick-gen-key
+            try:
+                cmd = [
+                    'gpg',
+                    '--homedir', self.keyring_dir,
+                    '--batch',
+                    '--passphrase', '',
+                    '--quick-gen-key', user_id,
+                    'rsa2048',
+                    'default',
+                    '0'  # Never expire
+                ]
                 
-                print("\n💡 Troubleshooting:")
-                print("   1. Try: export GPG_TTY=$(tty)")
-                print("   2. Try: gpg --batch --passphrase '' --quick-gen-key 'test' rsa2048")
-                print("   3. Or use manual setup (see TERMUX_TROUBLESHOOTING.md)")
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=120  # 2 minute timeout
+                )
+                
+                print(f"\nGPG command completed with return code: {result.returncode}")
+                
+                if result.returncode == 0:
+                    # Key generated successfully, get the fingerprint
+                    list_result = subprocess.run(
+                        ['gpg', '--homedir', self.keyring_dir, '--list-keys', '--with-colons'],
+                        capture_output=True,
+                        text=True
+                    )
+                    
+                    # Parse fingerprint from output
+                    for line in list_result.stdout.split('\n'):
+                        if line.startswith('fpr:'):
+                            fingerprint = line.split(':')[9]
+                            if fingerprint:
+                                self.my_key_id = fingerprint
+                                self.save_config()
+                                self._print_success("PGP key pair generated!")
+                                self._print_success(f"Key ID: {self.my_key_id}")
+                                print("\n" + "─"*60 + "\n")
+                                return
+                    
+                    # If we got here, couldn't find fingerprint
+                    self._print_error("Key generated but couldn't retrieve fingerprint")
+                    print("Run 'pgp list' to see available keys")
+                else:
+                    self._print_error(f"GPG command failed with code {result.returncode}")
+                    if result.stderr:
+                        print(f"Error: {result.stderr}")
+                    
+            except subprocess.TimeoutExpired:
+                self._print_error("Key generation timed out after 2 minutes")
+                print("This can happen on low-entropy systems")
+                print("Try: pkg install haveged && haveged -w 1024")
+            except Exception as e:
+                self._print_error(f"Failed to run GPG command: {e}")
+                print("\n💡 Falling back to python-gnupg method...")
+                
+                # Fallback to python-gnupg if subprocess fails
+                key_input = self.gpg.gen_key_input(
+                    name_real=name,
+                    name_email=email,
+                    key_type='RSA',
+                    key_length=2048,
+                    expire_date=0,
+                    passphrase=''
+                )
+                
+                key = self.gpg.gen_key(key_input)
+                
+                if key and str(key) and str(key).strip():
+                    self.my_key_id = str(key)
+                    self.save_config()
+                    self._print_success("PGP key pair generated!")
+                    self._print_success(f"Key ID: {self.my_key_id}")
+                    print("\n" + "─"*60 + "\n")
+                    return
+            
+            # If we got here, everything failed
+            self._print_error("Failed to generate key")
+            print(f"\n💡 Troubleshooting:")
+            print("   1. Try manually: gpg --batch --passphrase '' --quick-gen-key 'Test' rsa2048")
+            print("   2. Or see manual setup in TERMUX_TROUBLESHOOTING.md")
         except Exception as e:
             self._print_error(f"Key generation failed: {e}")
             import traceback
