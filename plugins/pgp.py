@@ -24,8 +24,13 @@ class Plugin:
         
         os.makedirs(self.keyring_dir, exist_ok=True)
         
-        # Initialize GPG
-        self.gpg = gnupg.GPG(gnupghome=self.keyring_dir)
+        # Initialize GPG with options for non-interactive environments (Termux fix)
+        gpg_options = [
+            '--batch',
+            '--no-tty',
+            '--pinentry-mode', 'loopback'
+        ]
+        self.gpg = gnupg.GPG(gnupghome=self.keyring_dir, options=gpg_options)
         
         # Load configuration
         self.config = self.load_config()
@@ -153,19 +158,21 @@ class Plugin:
             
             print(f"Using GPG version: {gpg_version}")
             
-            # Generate key with verbose error handling
+            # Generate key with batch mode (fixes Termux pinentry issues)
             key_input = self.gpg.gen_key_input(
                 name_real=name,
                 name_email=email,
                 key_type='RSA',
                 key_length=2048,
-                expire_date=0  # Never expire
+                expire_date=0,  # Never expire
+                passphrase=''   # No passphrase (batch mode)
             )
             
             print("Key input parameters generated")
             print("Starting key generation (please wait, this can take 30-60 seconds on mobile)...")
             print("TIP: Move your device around to help generate randomness!")
             
+            # Use batch mode to avoid pinentry issues on Termux
             key = self.gpg.gen_key(key_input)
             
             print(f"\nKey generation completed. Result type: {type(key)}")
@@ -181,16 +188,17 @@ class Plugin:
                 print("\n" + "─"*60 + "\n")
             else:
                 self._print_error("Failed to generate key")
-                # Try to get error details
+                # Show error details
                 print(f"\nDebug - Key object details:")
                 print(f"  Type: {type(key)}")
-                print(f"  Value: {key}")
-                print(f"  String: '{str(key)}'")
-                if hasattr(key, '__dict__'):
-                    print(f"  Attributes: {key.__dict__}")
+                print(f"  Status: {getattr(key, 'status', 'unknown')}")
+                if hasattr(key, 'stderr'):
+                    print(f"  Error output:\n{key.stderr}")
                 
-                print("\n💡 To retry manually, use: pgp keygen")
-                print("   Or try: gpg --gen-key (to test GPG directly)")
+                print("\n💡 Troubleshooting:")
+                print("   1. Try: export GPG_TTY=$(tty)")
+                print("   2. Try: gpg --batch --passphrase '' --quick-gen-key 'test' rsa2048")
+                print("   3. Or use manual setup (see TERMUX_TROUBLESHOOTING.md)")
         except Exception as e:
             self._print_error(f"Key generation failed: {e}")
             import traceback
