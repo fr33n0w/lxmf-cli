@@ -44,6 +44,9 @@ class Plugin:
         self.reject_unsigned = self.config.get('reject_unsigned', False)
         self.reject_unencrypted = self.config.get('reject_unencrypted', False)
         
+        # Passphrase for the key (empty by default for batch-generated keys)
+        self.passphrase = self.config.get('passphrase', '')
+        
         # Current user's key
         self.my_key_id = self.config.get('my_key_id', None)
         
@@ -96,7 +99,8 @@ class Plugin:
                 'auto_verify': self.auto_verify,
                 'auto_decrypt': self.auto_decrypt,
                 'reject_unsigned': self.reject_unsigned,
-                'reject_unencrypted': self.reject_unencrypted
+                'reject_unencrypted': self.reject_unencrypted,
+                'passphrase': self.passphrase
             }
             with open(self.config_file, 'w') as f:
                 json.dump(config, f, indent=2)
@@ -320,7 +324,10 @@ class Plugin:
     def decrypt_message(self, encrypted_content):
         """Decrypt encrypted message"""
         try:
-            decrypted = self.gpg.decrypt(encrypted_content)
+            decrypted = self.gpg.decrypt(
+                encrypted_content,
+                passphrase=self.passphrase
+            )
             
             if decrypted.ok:
                 return str(decrypted)
@@ -337,13 +344,19 @@ class Plugin:
             signed = self.gpg.sign(
                 content,
                 keyid=self.my_key_id,
-                clearsign=True
+                clearsign=True,
+                passphrase=self.passphrase
             )
             
-            if signed:
+            if signed and str(signed):
                 return str(signed)
             else:
                 self._print_error("Signing failed")
+                # Debug info
+                if hasattr(signed, 'status'):
+                    print(f"  Status: {signed.status}")
+                if hasattr(signed, 'stderr'):
+                    print(f"  Error: {signed.stderr}")
                 return None
         except Exception as e:
             self._print_error(f"Signing error: {e}")
@@ -534,6 +547,9 @@ class Plugin:
         elif subcmd == 'set':
             self.change_setting(parts)
         
+        elif subcmd == 'passphrase':
+            self.set_passphrase_command()
+        
         else:
             print(f"Unknown subcommand: {subcmd}")
             self.show_help()
@@ -648,6 +664,7 @@ class Plugin:
         print("\n🔑 Key Management:")
         print("  pgp keygen              - Generate new PGP key pair")
         print("  pgp export              - Export your public key")
+        print("  pgp passphrase          - Set/change key passphrase")
         print("  pgp exchange <contact>  - 🆕 AUTO key exchange (easiest!)")
         print("  pgp import <contact>    - Request public key from contact")
         print("  pgp trust <contact> <key> - Manually import and trust a key")
@@ -946,6 +963,45 @@ class Plugin:
         self.client.send_message(dest_hash, encrypted, title="🔐 Encrypted")
         
         self._print_success("Sent encrypted & signed message")
+    
+    
+    def set_passphrase_command(self):
+        """Set or change the passphrase for the PGP key"""
+        print("\n" + "─"*60)
+        print("SET KEY PASSPHRASE")
+        print("─"*60)
+        print("\nThis sets the passphrase used to unlock your PGP key.")
+        print("If your key has no passphrase, leave it empty.")
+        print()
+        
+        import getpass
+        try:
+            passphrase = getpass.getpass("Enter passphrase (or press Enter for none): ")
+            confirm = getpass.getpass("Confirm passphrase: ")
+            
+            if passphrase != confirm:
+                self._print_error("Passphrases don't match!")
+                return
+            
+            self.passphrase = passphrase
+            self.save_config()
+            
+            if passphrase:
+                self._print_success("Passphrase set successfully")
+            else:
+                self._print_success("Passphrase removed (empty)")
+            
+            print("\n💡 Test it: pgp send <contact> test")
+            
+        except KeyboardInterrupt:
+            print("\nCancelled")
+        except:
+            # Fallback for terminals without getpass
+            print("Getpass not available, using visible input:")
+            passphrase = input("Enter passphrase (visible!): ").strip()
+            self.passphrase = passphrase
+            self.save_config()
+            self._print_success("Passphrase set")
     
     def change_setting(self, parts):
         """Change plugin settings"""
