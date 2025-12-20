@@ -838,13 +838,23 @@ class Plugin:
     
     def trust_key_command(self, parts):
         """Import and trust a public key"""
-        if len(parts) < 4:
+        # parts = ['pgp', 'trust', 'contact key_data...']
+        
+        if len(parts) < 3:
             print("💡 Usage: pgp trust <contact> <key_data>")
             print("   Or paste the key on the next line")
             return
         
-        contact = parts[2]
-        key_data = ' '.join(parts[3:])
+        # Split: "contact key_data..." -> ["contact", "key_data..."]
+        rest = parts[2].split(maxsplit=1)
+        
+        if len(rest) < 2:
+            print("💡 Usage: pgp trust <contact> <key_data>")
+            print("   Paste the entire PGP public key block")
+            return
+        
+        contact = rest[0]
+        key_data = rest[1]
         
         # Resolve contact to hash
         dest_hash = self.client.resolve_contact_or_hash(contact)
@@ -888,12 +898,24 @@ class Plugin:
     
     def send_encrypted_command(self, parts):
         """Send encrypted and signed message"""
-        if len(parts) < 4:
+        # parts = ['pgp', 'send', 'contact message...']
+        # We need to split parts[2] to get contact and message
+        
+        if len(parts) < 3:
             print("💡 Usage: pgp send <contact> <message>")
             return
         
-        contact = parts[2]
-        message = ' '.join(parts[3:])
+        # Split the rest: "contact message..." -> ["contact", "message..."]
+        rest = parts[2].split(maxsplit=1)
+        
+        if len(rest) < 2:
+            print("💡 Usage: pgp send <contact> <message>")
+            print("Example: pgp send Alice Hello!")
+            print("Example: pgp send 2 Hello!")
+            return
+        
+        contact = rest[0]
+        message = rest[1]
         
         # Resolve contact to hash
         dest_hash = self.client.resolve_contact_or_hash(contact)
