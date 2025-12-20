@@ -175,6 +175,7 @@ class Plugin:
             
             # Try using gpg command directly with --quick-gen-key
             try:
+                # Generate key with cert,sign,encrypt capabilities
                 cmd = [
                     'gpg',
                     '--homedir', self.keyring_dir,
@@ -182,7 +183,7 @@ class Plugin:
                     '--passphrase', '',
                     '--quick-gen-key', user_id,
                     'rsa2048',
-                    'default',
+                    'cert,sign',  # Primary key capabilities
                     '0'  # Never expire
                 ]
                 
@@ -204,16 +205,47 @@ class Plugin:
                     )
                     
                     # Parse fingerprint from output
+                    fingerprint = None
                     for line in list_result.stdout.split('\n'):
                         if line.startswith('fpr:'):
                             fingerprint = line.split(':')[9]
                             if fingerprint:
-                                self.my_key_id = fingerprint
-                                self.save_config()
-                                self._print_success("PGP key pair generated!")
-                                self._print_success(f"Key ID: {self.my_key_id}")
-                                print("\n" + "─"*60 + "\n")
-                                return
+                                break
+                    
+                    if fingerprint:
+                        # Add encryption subkey
+                        print("Adding encryption subkey...")
+                        add_subkey_cmd = [
+                            'gpg',
+                            '--homedir', self.keyring_dir,
+                            '--batch',
+                            '--passphrase', '',
+                            '--quick-add-key', fingerprint,
+                            'rsa2048',
+                            'encrypt',
+                            '0'  # Never expire
+                        ]
+                        
+                        subkey_result = subprocess.run(
+                            add_subkey_cmd,
+                            capture_output=True,
+                            text=True,
+                            timeout=120
+                        )
+                        
+                        if subkey_result.returncode == 0:
+                            print("✓ Encryption subkey added")
+                        else:
+                            print(f"⚠ Warning: Could not add encryption subkey")
+                            print(f"  Error: {subkey_result.stderr}")
+                        
+                        # Save configuration
+                        self.my_key_id = fingerprint
+                        self.save_config()
+                        self._print_success("PGP key pair generated!")
+                        self._print_success(f"Key ID: {self.my_key_id}")
+                        print("\n" + "─"*60 + "\n")
+                        return
                     
                     # If we got here, couldn't find fingerprint
                     self._print_error("Key generated but couldn't retrieve fingerprint")
@@ -934,7 +966,7 @@ class Plugin:
             print("\nNo keys in keyring\n")
             return
         
-        print(f"\n{'Key ID':<18} {'Type':<12} {'Name':<30} {'Can Encrypt'}")
+        print(f"\n{'Key ID':<18} {'Type':<12} {'Name':<30} {'Capabilities'}")
         print("─"*70)
         
         for key in keys:
@@ -946,15 +978,26 @@ class Plugin:
             if len(name) > 28:
                 name = name[:25] + "..."
             
-            # Check if this is a public key (can encrypt)
-            can_encrypt = "Yes" if key['type'] in ['pub', 'RSA'] else "No"
+            # Get key capabilities
+            caps = []
+            if 'C' in key.get('cap', ''):
+                caps.append('Cert')
+            if 'S' in key.get('cap', ''):
+                caps.append('Sign')
+            if 'E' in key.get('cap', ''):
+                caps.append('Encrypt')
+            if 'A' in key.get('cap', ''):
+                caps.append('Auth')
+            
+            cap_str = ','.join(caps) if caps else 'Unknown'
             
             marker = "★ " if key['fingerprint'] == self.my_key_id else "  "
             
-            print(f"{marker}{key_id:<16} {key_type:<12} {name:<30} {can_encrypt}")
+            print(f"{marker}{key_id:<16} {key_type:<12} {name:<30} {cap_str}")
         
         print("─"*70)
-        print("\n★ = Your key\n")
+        print("\n★ = Your key")
+        print("Note: Keys need 'Encrypt' capability to receive encrypted messages\n")
         
         # Show trusted keys mapping
         if self.trusted_keys:
