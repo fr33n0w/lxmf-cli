@@ -2,6 +2,8 @@
 """
 PGP Plugin for LXMF CLI
 Provides end-to-end encryption and signing for LXMF messages using PGP/GPG
+
+INCOMPLETE AND EXPERIMENTAL ONLY AT THE MOMENT!
 """
 
 import os
