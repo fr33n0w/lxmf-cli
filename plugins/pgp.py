@@ -1,0 +1,616 @@
+#!/usr/bin/env python3
+"""
+PGP Plugin for LXMF CLI
+Provides end-to-end encryption and signing for LXMF messages using PGP/GPG
+"""
+
+import os
+import json
+import time
+import gnupg
+from datetime import datetime
+
+class Plugin:
+    def __init__(self, client):
+        self.client = client
+        self.commands = ['pgp']
+        self.description = "End-to-end PGP encryption and signing for messages"
+        
+        # Setup plugin storage
+        self.plugin_dir = os.path.join(client.storage_path, "plugins", "pgp")
+        self.keyring_dir = os.path.join(self.plugin_dir, "keyring")
+        self.config_file = os.path.join(self.plugin_dir, "config.json")
+        self.trusted_keys_file = os.path.join(self.plugin_dir, "trusted_keys.json")
+        
+        os.makedirs(self.keyring_dir, exist_ok=True)
+        
+        # Initialize GPG
+        self.gpg = gnupg.GPG(gnupghome=self.keyring_dir)
+        
+        # Load configuration
+        self.config = self.load_config()
+        self.trusted_keys = self.load_trusted_keys()
+        
+        # Auto-enable settings
+        self.auto_encrypt = self.config.get('auto_encrypt', False)
+        self.auto_sign = self.config.get('auto_sign', True)
+        self.auto_verify = self.config.get('auto_verify', True)
+        self.auto_decrypt = self.config.get('auto_decrypt', True)
+        self.reject_unsigned = self.config.get('reject_unsigned', False)
+        self.reject_unencrypted = self.config.get('reject_unencrypted', False)
+        
+        # Current user's key
+        self.my_key_id = self.config.get('my_key_id', None)
+        
+        # Initialize key if needed
+        if not self.my_key_id:
+            self._first_time_setup()
+        
+        self._print_success("PGP plugin loaded")
+        if self.my_key_id:
+            self._print_success(f"Using key: {self.my_key_id[:16]}...")
+    
+    def _print_success(self, msg):
+        """Print success message"""
+        if hasattr(self.client, '_print_success'):
+            self.client._print_success(f"[PGP] {msg}")
+        else:
+            print(f"✓ [PGP] {msg}")
+    
+    def _print_error(self, msg):
+        """Print error message"""
+        if hasattr(self.client, '_print_error'):
+            self.client._print_error(f"[PGP] {msg}")
+        else:
+            print(f"❌ [PGP] {msg}")
+    
+    def _print_warning(self, msg):
+        """Print warning message"""
+        if hasattr(self.client, '_print_warning'):
+            self.client._print_warning(f"[PGP] {msg}")
+        else:
+            print(f"⚠ [PGP] {msg}")
+    
+    def load_config(self):
+        """Load plugin configuration"""
+        if os.path.exists(self.config_file):
+            try:
+                with open(self.config_file, 'r') as f:
+                    return json.load(f)
+            except Exception as e:
+                self._print_warning(f"Error loading config: {e}")
+        return {}
+    
+    def save_config(self):
+        """Save plugin configuration"""
+        try:
+            config = {
+                'my_key_id': self.my_key_id,
+                'auto_encrypt': self.auto_encrypt,
+                'auto_sign': self.auto_sign,
+                'auto_verify': self.auto_verify,
+                'auto_decrypt': self.auto_decrypt,
+                'reject_unsigned': self.reject_unsigned,
+                'reject_unencrypted': self.reject_unencrypted
+            }
+            with open(self.config_file, 'w') as f:
+                json.dump(config, f, indent=2)
+        except Exception as e:
+            self._print_warning(f"Error saving config: {e}")
+    
+    def load_trusted_keys(self):
+        """Load trusted public keys mapping (hash -> key_id)"""
+        if os.path.exists(self.trusted_keys_file):
+            try:
+                with open(self.trusted_keys_file, 'r') as f:
+                    return json.load(f)
+            except Exception as e:
+                self._print_warning(f"Error loading trusted keys: {e}")
+        return {}
+    
+    def save_trusted_keys(self):
+        """Save trusted keys mapping"""
+        try:
+            with open(self.trusted_keys_file, 'w') as f:
+                json.dump(self.trusted_keys, f, indent=2)
+        except Exception as e:
+            self._print_warning(f"Error saving trusted keys: {e}")
+    
+    def _first_time_setup(self):
+        """First time setup - generate PGP key"""
+        print("\n" + "─"*60)
+        print("PGP PLUGIN - FIRST TIME SETUP")
+        print("─"*60)
+        print("\nNo PGP key found. Let's create one for you.")
+        print("This will be used to sign and encrypt your messages.\n")
+        
+        # Use display name from client
+        name = self.client.display_name if hasattr(self.client, 'display_name') else "LXMF User"
+        
+        # Generate email from LXMF address
+        if hasattr(self.client.destination, 'hash'):
+            import RNS
+            lxmf_addr = RNS.prettyhexrep(self.client.destination.hash).replace(":", "")
+            email = f"{lxmf_addr[:16]}@lxmf.local"
+        else:
+            email = "user@lxmf.local"
+        
+        print(f"Name: {name}")
+        print(f"Email: {email}")
+        print("\nGenerating 2048-bit RSA key pair...")
+        print("This may take a minute...\n")
+        
+        try:
+            key_input = self.gpg.gen_key_input(
+                name_real=name,
+                name_email=email,
+                key_type='RSA',
+                key_length=2048,
+                expire_date=0  # Never expire
+            )
+            
+            key = self.gpg.gen_key(key_input)
+            
+            if key:
+                self.my_key_id = str(key)
+                self.save_config()
+                self._print_success("PGP key pair generated!")
+                self._print_success(f"Key ID: {self.my_key_id}")
+                print("\n" + "─"*60 + "\n")
+            else:
+                self._print_error("Failed to generate key")
+        except Exception as e:
+            self._print_error(f"Key generation failed: {e}")
+    
+    def get_recipient_key(self, dest_hash):
+        """Get recipient's public key ID"""
+        # Normalize hash
+        clean_hash = dest_hash.replace(":", "").replace(" ", "").replace("<", "").replace(">", "").lower()
+        return self.trusted_keys.get(clean_hash)
+    
+    def import_public_key(self, dest_hash, key_data):
+        """Import a recipient's public key"""
+        try:
+            result = self.gpg.import_keys(key_data)
+            if result.count > 0:
+                key_id = result.fingerprints[0]
+                
+                # Store mapping
+                clean_hash = dest_hash.replace(":", "").replace(" ", "").replace("<", "").replace(">", "").lower()
+                self.trusted_keys[clean_hash] = key_id
+                self.save_trusted_keys()
+                
+                self._print_success(f"Imported public key: {key_id[:16]}...")
+                return key_id
+            else:
+                self._print_error("Failed to import key")
+                return None
+        except Exception as e:
+            self._print_error(f"Import failed: {e}")
+            return None
+    
+    def export_my_public_key(self):
+        """Export current user's public key"""
+        if not self.my_key_id:
+            return None
+        
+        try:
+            ascii_key = self.gpg.export_keys(self.my_key_id)
+            return ascii_key
+        except Exception as e:
+            self._print_error(f"Export failed: {e}")
+            return None
+    
+    def encrypt_message(self, content, recipient_key_id):
+        """Encrypt message content for recipient"""
+        try:
+            encrypted = self.gpg.encrypt(
+                content,
+                recipient_key_id,
+                always_trust=True,
+                armor=True
+            )
+            
+            if encrypted.ok:
+                return str(encrypted)
+            else:
+                self._print_error(f"Encryption failed: {encrypted.status}")
+                return None
+        except Exception as e:
+            self._print_error(f"Encryption error: {e}")
+            return None
+    
+    def decrypt_message(self, encrypted_content):
+        """Decrypt encrypted message"""
+        try:
+            decrypted = self.gpg.decrypt(encrypted_content)
+            
+            if decrypted.ok:
+                return str(decrypted)
+            else:
+                self._print_error(f"Decryption failed: {decrypted.status}")
+                return None
+        except Exception as e:
+            self._print_error(f"Decryption error: {e}")
+            return None
+    
+    def sign_message(self, content):
+        """Sign message content"""
+        try:
+            signed = self.gpg.sign(
+                content,
+                keyid=self.my_key_id,
+                clearsign=True
+            )
+            
+            if signed:
+                return str(signed)
+            else:
+                self._print_error("Signing failed")
+                return None
+        except Exception as e:
+            self._print_error(f"Signing error: {e}")
+            return None
+    
+    def verify_signature(self, signed_content):
+        """Verify signed message"""
+        try:
+            verified = self.gpg.verify(signed_content)
+            
+            if verified.valid:
+                # Extract original message
+                lines = signed_content.split('\n')
+                message_lines = []
+                in_message = False
+                
+                for line in lines:
+                    if line.startswith('-----BEGIN PGP SIGNED MESSAGE-----'):
+                        in_message = True
+                        continue
+                    elif line.startswith('-----BEGIN PGP SIGNATURE-----'):
+                        break
+                    elif in_message and not line.startswith('Hash: '):
+                        if line or message_lines:  # Skip initial empty lines
+                            message_lines.append(line)
+                
+                original_message = '\n'.join(message_lines).strip()
+                
+                return {
+                    'valid': True,
+                    'key_id': verified.key_id,
+                    'username': verified.username,
+                    'message': original_message
+                }
+            else:
+                return {
+                    'valid': False,
+                    'message': signed_content
+                }
+        except Exception as e:
+            self._print_error(f"Verification error: {e}")
+            return {'valid': False, 'message': signed_content}
+    
+    def on_message(self, message, msg_data):
+        """Handle incoming messages - auto decrypt/verify"""
+        try:
+            content = msg_data['content']
+            source_hash = msg_data['source_hash']
+            
+            # Check if message is encrypted
+            is_encrypted = '-----BEGIN PGP MESSAGE-----' in content
+            is_signed = '-----BEGIN PGP SIGNED MESSAGE-----' in content
+            
+            # Check rejection policies
+            if self.reject_unencrypted and not is_encrypted:
+                self._print_warning(f"Rejected unencrypted message from {source_hash[:16]}...")
+                print("  Enable 'pgp set reject_unencrypted off' to receive unencrypted messages")
+                return True  # Suppress normal notification
+            
+            if self.reject_unsigned and not is_signed and not is_encrypted:
+                self._print_warning(f"Rejected unsigned message from {source_hash[:16]}...")
+                print("  Enable 'pgp set reject_unsigned off' to receive unsigned messages")
+                return True  # Suppress normal notification
+            
+            modified = False
+            
+            # Auto-decrypt if enabled
+            if self.auto_decrypt and is_encrypted:
+                print(f"\n🔐 Encrypted message from {self.client.format_contact_display_short(source_hash)}")
+                decrypted = self.decrypt_message(content)
+                
+                if decrypted:
+                    msg_data['content'] = decrypted
+                    content = decrypted
+                    modified = True
+                    self._print_success("Message decrypted")
+                    
+                    # Check if decrypted content is also signed
+                    is_signed = '-----BEGIN PGP SIGNED MESSAGE-----' in content
+                else:
+                    self._print_error("Failed to decrypt message")
+                    return True  # Suppress - couldn't decrypt
+            
+            # Auto-verify if enabled
+            if self.auto_verify and is_signed:
+                result = self.verify_signature(content)
+                
+                if result['valid']:
+                    msg_data['content'] = result['message']
+                    modified = True
+                    self._print_success(f"✓ Signature valid - From: {result.get('username', 'Unknown')}")
+                    print(f"  Key ID: {result['key_id'][:16]}...")
+                else:
+                    self._print_warning("⚠ Invalid or missing signature!")
+                    if self.reject_unsigned:
+                        return True  # Suppress
+            
+            return False  # Let normal notification proceed if we modified it
+            
+        except Exception as e:
+            self._print_error(f"Message processing error: {e}")
+            return False
+    
+    def handle_command(self, cmd, parts):
+        """Handle PGP commands"""
+        if len(parts) < 2:
+            self.show_help()
+            return
+        
+        subcmd = parts[1].lower()
+        
+        if subcmd == 'help':
+            self.show_help()
+        
+        elif subcmd == 'status':
+            self.show_status()
+        
+        elif subcmd == 'keygen':
+            self.generate_new_key()
+        
+        elif subcmd == 'export':
+            self.export_key_command()
+        
+        elif subcmd == 'import':
+            self.import_key_command(parts)
+        
+        elif subcmd == 'trust':
+            self.trust_key_command(parts)
+        
+        elif subcmd == 'list':
+            self.list_keys()
+        
+        elif subcmd == 'send':
+            self.send_encrypted_command(parts)
+        
+        elif subcmd == 'set':
+            self.change_setting(parts)
+        
+        else:
+            print(f"Unknown subcommand: {subcmd}")
+            self.show_help()
+    
+    def show_help(self):
+        """Show plugin help"""
+        print("\n" + "─"*70)
+        print("PGP PLUGIN - COMMANDS")
+        print("─"*70)
+        
+        print("\n📊 Status & Info:")
+        print("  pgp status              - Show PGP status and settings")
+        print("  pgp list                - List all keys in keyring")
+        
+        print("\n🔑 Key Management:")
+        print("  pgp keygen              - Generate new PGP key pair")
+        print("  pgp export              - Export your public key")
+        print("  pgp import <contact>    - Request public key from contact")
+        print("  pgp trust <contact> <key> - Import and trust a public key")
+        
+        print("\n📨 Messaging:")
+        print("  pgp send <contact> <msg> - Send encrypted message")
+        
+        print("\n⚙️  Settings:")
+        print("  pgp set auto_encrypt on/off    - Auto-encrypt outgoing")
+        print("  pgp set auto_sign on/off        - Auto-sign outgoing")
+        print("  pgp set auto_decrypt on/off     - Auto-decrypt incoming")
+        print("  pgp set auto_verify on/off      - Auto-verify signatures")
+        print("  pgp set reject_unsigned on/off  - Reject unsigned messages")
+        print("  pgp set reject_unencrypted on/off - Reject unencrypted")
+        
+        print("\n" + "─"*70 + "\n")
+    
+    def show_status(self):
+        """Show PGP status"""
+        print("\n" + "─"*70)
+        print("PGP STATUS")
+        print("─"*70)
+        
+        print(f"\n🔑 Your Key:")
+        if self.my_key_id:
+            print(f"  Key ID: {self.my_key_id}")
+            keys = self.gpg.list_keys()
+            my_key = next((k for k in keys if k['fingerprint'] == self.my_key_id), None)
+            if my_key:
+                print(f"  Name: {my_key['uids'][0] if my_key['uids'] else 'Unknown'}")
+                print(f"  Type: {my_key['type']} {my_key['length']}-bit")
+        else:
+            print("  No key configured")
+        
+        print(f"\n⚙️  Settings:")
+        print(f"  Auto-encrypt:  {'ON' if self.auto_encrypt else 'OFF'}")
+        print(f"  Auto-sign:     {'ON' if self.auto_sign else 'OFF'}")
+        print(f"  Auto-decrypt:  {'ON' if self.auto_decrypt else 'OFF'}")
+        print(f"  Auto-verify:   {'ON' if self.auto_verify else 'OFF'}")
+        print(f"  Reject unsigned:    {'ON' if self.reject_unsigned else 'OFF'}")
+        print(f"  Reject unencrypted: {'ON' if self.reject_unencrypted else 'OFF'}")
+        
+        print(f"\n👥 Trusted Keys: {len(self.trusted_keys)}")
+        if self.trusted_keys:
+            for hash_str, key_id in list(self.trusted_keys.items())[:5]:
+                contact_name = self.client.format_contact_display_short(hash_str)
+                print(f"  {contact_name}: {key_id[:16]}...")
+            if len(self.trusted_keys) > 5:
+                print(f"  ... and {len(self.trusted_keys) - 5} more")
+        
+        print("\n" + "─"*70 + "\n")
+    
+    def generate_new_key(self):
+        """Generate a new PGP key"""
+        print("\n⚠ Warning: This will replace your current key!")
+        confirm = input("Continue? [y/N]: ").strip().lower()
+        
+        if confirm != 'y':
+            print("Cancelled")
+            return
+        
+        self.my_key_id = None
+        self._first_time_setup()
+    
+    def export_key_command(self):
+        """Export public key and prepare for sending"""
+        public_key = self.export_my_public_key()
+        
+        if public_key:
+            print("\n" + "─"*70)
+            print("YOUR PUBLIC KEY")
+            print("─"*70)
+            print(public_key)
+            print("─"*70)
+            print("\n💡 Share this with contacts so they can send you encrypted messages")
+            print("   You can send it via: send <contact> <paste key here>")
+            print()
+    
+    def import_key_command(self, parts):
+        """Request public key from contact"""
+        if len(parts) < 3:
+            print("💡 Usage: pgp import <contact>")
+            return
+        
+        contact = parts[2]
+        
+        # Send request message
+        request_msg = "PGP_KEY_REQUEST"
+        self.client.send_message(contact, request_msg, title="PGP Key Request")
+        
+        print(f"\n📨 Sent key request to {contact}")
+        print("   Waiting for their public key...")
+    
+    def trust_key_command(self, parts):
+        """Import and trust a public key"""
+        if len(parts) < 4:
+            print("💡 Usage: pgp trust <contact> <key_data>")
+            print("   Or paste the key on the next line")
+            return
+        
+        contact = parts[2]
+        key_data = ' '.join(parts[3:])
+        
+        # Resolve contact to hash
+        dest_hash = self.client.resolve_contact_or_hash(contact)
+        if not dest_hash:
+            self._print_error(f"Unknown contact: {contact}")
+            return
+        
+        # Import the key
+        result = self.import_public_key(dest_hash, key_data)
+        
+        if result:
+            contact_display = self.client.format_contact_display_short(dest_hash)
+            self._print_success(f"Trusted key for {contact_display}")
+    
+    def list_keys(self):
+        """List all keys in keyring"""
+        print("\n" + "─"*70)
+        print("PGP KEYRING")
+        print("─"*70)
+        
+        keys = self.gpg.list_keys()
+        
+        if not keys:
+            print("\nNo keys in keyring\n")
+            return
+        
+        print(f"\n{'Key ID':<18} {'Type':<12} {'Name'}")
+        print("─"*70)
+        
+        for key in keys:
+            key_id = key['keyid'][-16:]
+            key_type = f"{key['type']} {key['length']}-bit"
+            name = key['uids'][0] if key['uids'] else 'Unknown'
+            
+            marker = "★ " if key['fingerprint'] == self.my_key_id else "  "
+            
+            print(f"{marker}{key_id:<16} {key_type:<12} {name}")
+        
+        print("─"*70)
+        print("\n★ = Your key\n")
+    
+    def send_encrypted_command(self, parts):
+        """Send encrypted and signed message"""
+        if len(parts) < 4:
+            print("💡 Usage: pgp send <contact> <message>")
+            return
+        
+        contact = parts[2]
+        message = ' '.join(parts[3:])
+        
+        # Resolve contact to hash
+        dest_hash = self.client.resolve_contact_or_hash(contact)
+        if not dest_hash:
+            self._print_error(f"Unknown contact: {contact}")
+            return
+        
+        # Get recipient's public key
+        recipient_key = self.get_recipient_key(dest_hash)
+        
+        if not recipient_key:
+            self._print_error(f"No public key for {contact}")
+            print("   Use 'pgp import <contact>' to request their key")
+            print("   Or 'pgp trust <contact> <key>' to import manually")
+            return
+        
+        # Sign the message first
+        signed = self.sign_message(message)
+        if not signed:
+            return
+        
+        # Then encrypt the signed message
+        encrypted = self.encrypt_message(signed, recipient_key)
+        if not encrypted:
+            return
+        
+        # Send via normal LXMF
+        self.client.send_message(dest_hash, encrypted, title="🔐 Encrypted")
+        
+        self._print_success("Sent encrypted & signed message")
+    
+    def change_setting(self, parts):
+        """Change plugin settings"""
+        if len(parts) < 4:
+            print("💡 Usage: pgp set <setting> <on/off>")
+            print("\nAvailable settings:")
+            print("  auto_encrypt, auto_sign, auto_decrypt, auto_verify")
+            print("  reject_unsigned, reject_unencrypted")
+            return
+        
+        setting = parts[2].lower()
+        value = parts[3].lower() in ['on', 'yes', 'true', '1']
+        
+        if setting == 'auto_encrypt':
+            self.auto_encrypt = value
+        elif setting == 'auto_sign':
+            self.auto_sign = value
+        elif setting == 'auto_decrypt':
+            self.auto_decrypt = value
+        elif setting == 'auto_verify':
+            self.auto_verify = value
+        elif setting == 'reject_unsigned':
+            self.reject_unsigned = value
+        elif setting == 'reject_unencrypted':
+            self.reject_unencrypted = value
+        else:
+            self._print_error(f"Unknown setting: {setting}")
+            return
+        
+        self.save_config()
+        status = "enabled" if value else "disabled"
+        self._print_success(f"{setting}: {status}")
