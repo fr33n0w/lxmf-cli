@@ -276,6 +276,17 @@ class Plugin:
             if result.count > 0:
                 key_id = result.fingerprints[0]
                 
+                # Set trust level to ultimate for imported keys
+                # This is needed for GPG to consider the key "usable"
+                try:
+                    import subprocess
+                    # Trust the key using GPG command
+                    trust_cmd = f"echo -e \"5\ny\n\" | gpg --homedir {self.keyring_dir} --command-fd 0 --expert --edit-key {key_id} trust quit"
+                    subprocess.run(trust_cmd, shell=True, capture_output=True)
+                except Exception as e:
+                    # If trust setting fails, try alternative method
+                    pass
+                
                 # Store mapping
                 clean_hash = dest_hash.replace(":", "").replace(" ", "").replace("<", "").replace(">", "").lower()
                 self.trusted_keys[clean_hash] = key_id
@@ -571,6 +582,9 @@ class Plugin:
         
         elif subcmd == 'passphrase':
             self.set_passphrase_command()
+        
+        elif subcmd == 'trustlevel':
+            self.trust_level_command(parts)
         
         else:
             print(f"Unknown subcommand: {subcmd}")
@@ -1003,6 +1017,103 @@ class Plugin:
         
         self._print_success("Sent encrypted & signed message")
     
+    
+    
+    def trust_level_command(self, parts):
+        """Manually set trust level on a key to make it usable"""
+        if len(parts) < 3:
+            print("💡 Usage: pgp trustlevel <contact_or_key_id>")
+            return
+        
+        target = parts[2]
+        
+        # Try to resolve as contact first
+        dest_hash = self.client.resolve_contact_or_hash(target)
+        key_id = None
+        
+        if dest_hash:
+            # Get their key ID
+            key_id = self.get_recipient_key(dest_hash)
+        else:
+            # Might be a direct key ID
+            key_id = target
+        
+        if not key_id:
+            self._print_error(f"Unknown contact or key: {target}")
+            return
+        
+        print(f"\nSetting trust level for key: {key_id[:16]}...")
+        
+        import subprocess
+        
+        # Method 1: Interactive trust setting
+        try:
+            # Use echo to pipe "5" (ultimate trust) and "y" (confirm)
+            cmd = f'echo -e "5\\ny\\n" | gpg --homedir "{self.keyring_dir}" --command-fd 0 --expert --edit-key {key_id} trust quit'
+            
+            result = subprocess.run(
+                cmd,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            
+            if result.returncode == 0:
+                self._print_success("Trust level set to ULTIMATE")
+                print("  The key should now be usable for encryption")
+            else:
+                self._print_error("Failed to set trust level")
+                print(f"  Error: {result.stderr}")
+                
+                # Try Windows-compatible method
+                print("\n  Trying alternative method...")
+                self._trust_key_windows(key_id)
+        
+        except Exception as e:
+            self._print_error(f"Error: {e}")
+            # Try Windows method
+            self._trust_key_windows(key_id)
+    
+    def _trust_key_windows(self, key_id):
+        """Windows-compatible method to trust a key"""
+        import subprocess
+        
+        try:
+            # Create a temporary file with trust commands
+            import tempfile
+            import os
+            
+            with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt') as f:
+                f.write("5\ny\n")
+                temp_file = f.name
+            
+            try:
+                cmd = f'gpg --homedir "{self.keyring_dir}" --command-file "{temp_file}" --expert --edit-key {key_id} trust quit'
+                
+                result = subprocess.run(
+                    cmd,
+                    shell=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                
+                if result.returncode == 0:
+                    self._print_success("Trust level set (Windows method)")
+                else:
+                    self._print_error("Windows method also failed")
+                    print("\n  Manual fix:")
+                    print(f"  1. Run: gpg --edit-key {key_id}")
+                    print(f"  2. Type: trust")
+                    print(f"  3. Type: 5 (ultimate)")
+                    print(f"  4. Type: y (confirm)")
+                    print(f"  5. Type: quit")
+            finally:
+                os.unlink(temp_file)
+        
+        except Exception as e:
+            self._print_error(f"Windows method error: {e}")
     
     def set_passphrase_command(self):
         """Set or change the passphrase for the PGP key"""
