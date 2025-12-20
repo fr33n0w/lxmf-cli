@@ -305,6 +305,23 @@ class Plugin:
     def encrypt_message(self, content, recipient_key_id):
         """Encrypt message content for recipient"""
         try:
+            # Ensure recipient_key_id is valid (might be fingerprint or key ID)
+            # Try to verify the key exists first
+            keys = self.gpg.list_keys()
+            recipient_found = False
+            for key in keys:
+                if recipient_key_id in [key['fingerprint'], key['keyid']]:
+                    recipient_found = True
+                    # Use fingerprint for encryption (most reliable)
+                    recipient_key_id = key['fingerprint']
+                    break
+            
+            if not recipient_found:
+                self._print_error(f"Recipient key not found in keyring")
+                print(f"  Looking for: {recipient_key_id[:16]}...")
+                print(f"  Available keys: {len(keys)}")
+                return None
+            
             encrypted = self.gpg.encrypt(
                 content,
                 recipient_key_id,
@@ -316,6 +333,8 @@ class Plugin:
                 return str(encrypted)
             else:
                 self._print_error(f"Encryption failed: {encrypted.status}")
+                if hasattr(encrypted, 'stderr'):
+                    print(f"  GPG error: {encrypted.stderr}")
                 return None
         except Exception as e:
             self._print_error(f"Encryption error: {e}")
@@ -475,6 +494,7 @@ class Plugin:
                 decrypted = self.decrypt_message(content)
                 
                 if decrypted:
+                    # UPDATE the message content so LXMF shows decrypted version
                     msg_data['content'] = decrypted
                     content = decrypted
                     modified = True
@@ -491,6 +511,7 @@ class Plugin:
                 result = self.verify_signature(content)
                 
                 if result['valid']:
+                    # UPDATE content to show the verified message without signature
                     msg_data['content'] = result['message']
                     modified = True
                     self._print_success(f"✓ Signature valid - From: {result.get('username', 'Unknown')}")
@@ -500,7 +521,8 @@ class Plugin:
                     if self.reject_unsigned:
                         return True  # Suppress
             
-            return False  # Let normal notification proceed if we modified it
+            # Return False so normal notification shows the DECRYPTED content
+            return False
             
         except Exception as e:
             self._print_error(f"Message processing error: {e}")
@@ -898,7 +920,7 @@ class Plugin:
             print("\nNo keys in keyring\n")
             return
         
-        print(f"\n{'Key ID':<18} {'Type':<12} {'Name'}")
+        print(f"\n{'Key ID':<18} {'Type':<12} {'Name':<30} {'Can Encrypt'}")
         print("─"*70)
         
         for key in keys:
@@ -906,12 +928,29 @@ class Plugin:
             key_type = f"{key['type']} {key['length']}-bit"
             name = key['uids'][0] if key['uids'] else 'Unknown'
             
+            # Truncate name if too long
+            if len(name) > 28:
+                name = name[:25] + "..."
+            
+            # Check if this is a public key (can encrypt)
+            can_encrypt = "Yes" if key['type'] in ['pub', 'RSA'] else "No"
+            
             marker = "★ " if key['fingerprint'] == self.my_key_id else "  "
             
-            print(f"{marker}{key_id:<16} {key_type:<12} {name}")
+            print(f"{marker}{key_id:<16} {key_type:<12} {name:<30} {can_encrypt}")
         
         print("─"*70)
         print("\n★ = Your key\n")
+        
+        # Show trusted keys mapping
+        if self.trusted_keys:
+            print("Trusted Keys Mapping:")
+            for hash_str, key_id in list(self.trusted_keys.items())[:5]:
+                contact_name = self.client.format_contact_display_short(hash_str)
+                print(f"  {contact_name}: {key_id[:16]}...")
+            if len(self.trusted_keys) > 5:
+                print(f"  ... and {len(self.trusted_keys) - 5} more")
+            print()
     
     def send_encrypted_command(self, parts):
         """Send encrypted and signed message"""
