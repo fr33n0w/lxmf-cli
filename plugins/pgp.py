@@ -138,9 +138,22 @@ class Plugin:
         print(f"Name: {name}")
         print(f"Email: {email}")
         print("\nGenerating 2048-bit RSA key pair...")
-        print("This may take a minute...\n")
+        print("This may take a minute (especially on mobile devices)...\n")
         
         try:
+            # Check if GPG is working
+            gpg_version = self.gpg.version
+            if not gpg_version:
+                self._print_error("GPG not properly initialized!")
+                self._print_error(f"GPG home: {self.keyring_dir}")
+                print("\nTo fix this, try:")
+                print("  1. Check GPG is installed: gpg --version")
+                print("  2. Manually run: pgp keygen")
+                return
+            
+            print(f"Using GPG version: {gpg_version}")
+            
+            # Generate key with verbose error handling
             key_input = self.gpg.gen_key_input(
                 name_real=name,
                 name_email=email,
@@ -149,9 +162,10 @@ class Plugin:
                 expire_date=0  # Never expire
             )
             
+            print("Starting key generation...")
             key = self.gpg.gen_key(key_input)
             
-            if key:
+            if key and str(key):
                 self.my_key_id = str(key)
                 self.save_config()
                 self._print_success("PGP key pair generated!")
@@ -159,8 +173,15 @@ class Plugin:
                 print("\n" + "─"*60 + "\n")
             else:
                 self._print_error("Failed to generate key")
+                self._print_error(f"GPG stderr: {self.gpg.result.stderr}")
+                print("\n💡 To retry manually, use: pgp keygen")
+                print("   Or check GPG installation with: gpg --version")
         except Exception as e:
             self._print_error(f"Key generation failed: {e}")
+            import traceback
+            print("\nDebug info:")
+            traceback.print_exc()
+            print("\n💡 To retry manually, use: pgp keygen")
     
     def get_recipient_key(self, dest_hash):
         """Get recipient's public key ID"""
@@ -367,6 +388,9 @@ class Plugin:
         elif subcmd == 'keygen':
             self.generate_new_key()
         
+        elif subcmd == 'diagnose' or subcmd == 'debug':
+            self.diagnose_gpg()
+        
         elif subcmd == 'export':
             self.export_key_command()
         
@@ -389,6 +413,102 @@ class Plugin:
             print(f"Unknown subcommand: {subcmd}")
             self.show_help()
     
+    def diagnose_gpg(self):
+        """Diagnose GPG installation and configuration"""
+        print("\n" + "─"*70)
+        print("PGP DIAGNOSTIC INFORMATION")
+        print("─"*70)
+        
+        # Check GPG binary
+        print("\n🔍 GPG Binary:")
+        try:
+            import subprocess
+            result = subprocess.run(['gpg', '--version'], 
+                                  capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                first_line = result.stdout.split('\n')[0]
+                print(f"  ✓ Found: {first_line}")
+            else:
+                print(f"  ❌ GPG check failed: {result.stderr}")
+        except FileNotFoundError:
+            print("  ❌ GPG binary not found in PATH")
+            print("     Install: pkg install gnupg (Termux)")
+            print("     Or: sudo apt install gnupg (Linux)")
+        except Exception as e:
+            print(f"  ❌ Error running GPG: {e}")
+        
+        # Check python-gnupg
+        print("\n🐍 Python GnuPG Library:")
+        try:
+            import gnupg
+            print(f"  ✓ Module loaded: {gnupg.__file__}")
+        except ImportError:
+            print("  ❌ python-gnupg not installed")
+            print("     Install: pip install python-gnupg --break-system-packages")
+        
+        # Check GPG home directory
+        print(f"\n📁 Keyring Directory:")
+        print(f"  Path: {self.keyring_dir}")
+        print(f"  Exists: {os.path.exists(self.keyring_dir)}")
+        print(f"  Writable: {os.access(self.keyring_dir, os.W_OK)}")
+        
+        # Check GPG version via python-gnupg
+        print(f"\n🔧 Python-GnuPG Status:")
+        try:
+            gpg_version = self.gpg.version
+            if gpg_version:
+                print(f"  ✓ GPG version: {gpg_version}")
+            else:
+                print("  ❌ Could not get GPG version")
+                print("     GPG may not be properly configured")
+        except Exception as e:
+            print(f"  ❌ Error: {e}")
+        
+        # List existing keys
+        print(f"\n🔑 Current Keys in Keyring:")
+        try:
+            keys = self.gpg.list_keys()
+            if keys:
+                print(f"  Found {len(keys)} key(s):")
+                for key in keys:
+                    key_id = key['keyid'][-16:]
+                    name = key['uids'][0] if key['uids'] else 'Unknown'
+                    marker = "  ★" if key['fingerprint'] == self.my_key_id else "   "
+                    print(f"{marker} {key_id}: {name}")
+            else:
+                print("  No keys found in keyring")
+        except Exception as e:
+            print(f"  ❌ Error listing keys: {e}")
+        
+        # Check config
+        print(f"\n⚙️  Plugin Configuration:")
+        print(f"  Config file: {self.config_file}")
+        print(f"  Configured key ID: {self.my_key_id if self.my_key_id else 'None'}")
+        
+        # Recommendations
+        print("\n" + "─"*70)
+        print("💡 Recommendations:")
+        
+        if not self.my_key_id:
+            print("  • No key configured - run: pgp keygen")
+        
+        try:
+            subprocess.run(['gpg', '--version'], 
+                         capture_output=True, timeout=1, check=True)
+        except:
+            print("  • Install GPG: pkg install gnupg")
+        
+        try:
+            import gnupg
+        except:
+            print("  • Install python-gnupg:")
+            print("    pip install python-gnupg --break-system-packages")
+        
+        if not os.access(self.keyring_dir, os.W_OK):
+            print(f"  • Fix permissions: chmod 700 {self.keyring_dir}")
+        
+        print("\n" + "─"*70 + "\n")
+    
     def show_help(self):
         """Show plugin help"""
         print("\n" + "─"*70)
@@ -398,6 +518,7 @@ class Plugin:
         print("\n📊 Status & Info:")
         print("  pgp status              - Show PGP status and settings")
         print("  pgp list                - List all keys in keyring")
+        print("  pgp diagnose            - Diagnose GPG installation issues")
         
         print("\n🔑 Key Management:")
         print("  pgp keygen              - Generate new PGP key pair")
@@ -415,6 +536,12 @@ class Plugin:
         print("  pgp set auto_verify on/off      - Auto-verify signatures")
         print("  pgp set reject_unsigned on/off  - Reject unsigned messages")
         print("  pgp set reject_unencrypted on/off - Reject unencrypted")
+        
+        print("\n💡 Quick Start:")
+        print("  1. pgp keygen           - Generate your key")
+        print("  2. pgp export           - Get your public key")
+        print("  3. pgp trust <contact> <key> - Import contact's key")
+        print("  4. pgp send <contact> <msg>  - Send encrypted message")
         
         print("\n" + "─"*70 + "\n")
     
@@ -455,15 +582,38 @@ class Plugin:
     
     def generate_new_key(self):
         """Generate a new PGP key"""
-        print("\n⚠ Warning: This will replace your current key!")
-        confirm = input("Continue? [y/N]: ").strip().lower()
+        if self.my_key_id:
+            print("\n⚠ Warning: This will replace your current key!")
+            print(f"Current key: {self.my_key_id}")
+            confirm = input("Continue? [y/N]: ").strip().lower()
+            
+            if confirm != 'y':
+                print("Cancelled")
+                return
+        else:
+            print("\n📝 Generating new PGP key...")
         
-        if confirm != 'y':
-            print("Cancelled")
-            return
-        
+        # Clear current key
+        old_key = self.my_key_id
         self.my_key_id = None
+        
+        # Run setup
         self._first_time_setup()
+        
+        # Verify it worked
+        if self.my_key_id:
+            self._print_success("Key generation complete!")
+        else:
+            self._print_error("Key generation incomplete")
+            print("\n🔍 Troubleshooting steps:")
+            print("  1. Check GPG: gpg --version")
+            print("  2. Test GPG: gpg --gen-key")
+            print("  3. Check permissions on: " + self.keyring_dir)
+            print("  4. On Termux, ensure: pkg install gnupg")
+            if old_key:
+                print(f"\n  Your old key ID was: {old_key}")
+                print("  (It has not been deleted from the keyring)")
+
     
     def export_key_command(self):
         """Export public key and prepare for sending"""
