@@ -388,10 +388,56 @@ class Plugin:
             return {'valid': False, 'message': signed_content}
     
     def on_message(self, message, msg_data):
-        """Handle incoming messages - auto decrypt/verify"""
+        """Handle incoming messages - auto decrypt/verify and handle key exchange"""
         try:
             content = msg_data['content']
             source_hash = msg_data['source_hash']
+            title = msg_data.get('title', '')
+            
+            # === AUTOMATIC KEY EXCHANGE ===
+            
+            # 1. Handle key requests
+            if content.strip() == "PGP_KEY_REQUEST" or title == "PGP Key Request":
+                self._print_success(f"Received key request from {self.client.format_contact_display_short(source_hash)}")
+                
+                # Auto-send our public key back
+                my_public_key = self.export_my_public_key()
+                if my_public_key:
+                    self.client.send_message(
+                        source_hash, 
+                        my_public_key,
+                        title="PGP Public Key"
+                    )
+                    self._print_success("Automatically sent our public key in response")
+                
+                return True  # Suppress normal notification
+            
+            # 2. Handle key responses (auto-import)
+            if "-----BEGIN PGP PUBLIC KEY BLOCK-----" in content and "-----END PGP PUBLIC KEY BLOCK-----" in content:
+                # This looks like a PGP public key
+                
+                # Check if we already have this key
+                existing_key = self.get_recipient_key(source_hash)
+                
+                if not existing_key:
+                    self._print_success(f"Received public key from {self.client.format_contact_display_short(source_hash)}")
+                    
+                    # Auto-import the key
+                    key_id = self.import_public_key(source_hash, content)
+                    
+                    if key_id:
+                        contact_name = self.client.format_contact_display_short(source_hash)
+                        self._print_success(f"✓ Auto-imported and trusted key for {contact_name}")
+                        print(f"  You can now send encrypted messages: pgp send {contact_name} <message>")
+                    
+                    return True  # Suppress normal notification
+                else:
+                    # We already have their key, just show it arrived
+                    print(f"\n📩 Received public key from {self.client.format_contact_display_short(source_hash)}")
+                    print("   (Already have their key, ignoring)")
+                    return True
+            
+            # === NORMAL MESSAGE PROCESSING ===
             
             # Check if message is encrypted
             is_encrypted = '-----BEGIN PGP MESSAGE-----' in content
@@ -472,6 +518,9 @@ class Plugin:
         
         elif subcmd == 'import':
             self.import_key_command(parts)
+        
+        elif subcmd == 'exchange':
+            self.exchange_keys_command(parts)
         
         elif subcmd == 'trust':
             self.trust_key_command(parts)
@@ -599,8 +648,9 @@ class Plugin:
         print("\n🔑 Key Management:")
         print("  pgp keygen              - Generate new PGP key pair")
         print("  pgp export              - Export your public key")
+        print("  pgp exchange <contact>  - 🆕 AUTO key exchange (easiest!)")
         print("  pgp import <contact>    - Request public key from contact")
-        print("  pgp trust <contact> <key> - Import and trust a public key")
+        print("  pgp trust <contact> <key> - Manually import and trust a key")
         
         print("\n📨 Messaging:")
         print("  pgp send <contact> <msg> - Send encrypted message")
@@ -614,10 +664,9 @@ class Plugin:
         print("  pgp set reject_unencrypted on/off - Reject unencrypted")
         
         print("\n💡 Quick Start:")
-        print("  1. pgp keygen           - Generate your key")
-        print("  2. pgp export           - Get your public key")
-        print("  3. pgp trust <contact> <key> - Import contact's key")
-        print("  4. pgp send <contact> <msg>  - Send encrypted message")
+        print("  1. pgp exchange <contact>    - Automatic key exchange!")
+        print("  2. Wait 5-10 seconds")
+        print("  3. pgp send <contact> <msg>  - Send encrypted message")
         
         print("\n" + "─"*70 + "\n")
     
@@ -706,19 +755,86 @@ class Plugin:
             print()
     
     def import_key_command(self, parts):
-        """Request public key from contact"""
+        """Request public key from contact - sends automatic key request"""
         if len(parts) < 3:
             print("💡 Usage: pgp import <contact>")
+            print("   This will send an automatic key request to the contact")
             return
         
         contact = parts[2]
         
-        # Send request message
-        request_msg = "PGP_KEY_REQUEST"
-        self.client.send_message(contact, request_msg, title="PGP Key Request")
+        # Resolve contact
+        dest_hash = self.client.resolve_contact_or_hash(contact)
+        if not dest_hash:
+            self._print_error(f"Unknown contact: {contact}")
+            return
         
-        print(f"\n📨 Sent key request to {contact}")
-        print("   Waiting for their public key...")
+        # Check if we already have their key
+        existing_key = self.get_recipient_key(dest_hash)
+        if existing_key:
+            contact_name = self.client.format_contact_display_short(dest_hash)
+            self._print_warning(f"You already have a key for {contact_name}")
+            print(f"   Key ID: {existing_key[:16]}...")
+            
+            confirm = input("Request new key anyway? [y/N]: ").strip().lower()
+            if confirm != 'y':
+                print("Cancelled")
+                return
+        
+        # Send automatic key request
+        self.client.send_message(dest_hash, "PGP_KEY_REQUEST", title="PGP Key Request")
+        
+        contact_name = self.client.format_contact_display_short(dest_hash)
+        self._print_success(f"📨 Sent automatic key request to {contact_name}")
+        print("   They will receive a request and their client will auto-respond")
+        print("   You'll receive and auto-import their key when they respond")
+        print(f"\n💡 Wait a few seconds, then check: pgp list")
+    
+    def exchange_keys_command(self, parts):
+        """Automatic bidirectional key exchange with a contact"""
+        if len(parts) < 3:
+            print("💡 Usage: pgp exchange <contact>")
+            print("   This will:")
+            print("   1. Send your public key to the contact")
+            print("   2. Request their public key")
+            print("   3. Auto-import when they respond")
+            return
+        
+        contact = parts[2]
+        
+        # Resolve contact
+        dest_hash = self.client.resolve_contact_or_hash(contact)
+        if not dest_hash:
+            self._print_error(f"Unknown contact: {contact}")
+            return
+        
+        contact_name = self.client.format_contact_display_short(dest_hash)
+        
+        print(f"\n🔄 Starting key exchange with {contact_name}...")
+        print("─"*60)
+        
+        # Step 1: Send our public key
+        my_public_key = self.export_my_public_key()
+        if my_public_key:
+            self.client.send_message(dest_hash, my_public_key, title="PGP Public Key")
+            self._print_success("✓ Sent our public key")
+        else:
+            self._print_error("Failed to export our key")
+            return
+        
+        # Step 2: Request their public key
+        self.client.send_message(dest_hash, "PGP_KEY_REQUEST", title="PGP Key Request")
+        self._print_success("✓ Sent key request")
+        
+        print("─"*60)
+        print(f"\n✅ Key exchange initiated with {contact_name}")
+        print("\n📥 What happens next:")
+        print("   1. They receive your public key (auto-imported)")
+        print("   2. They receive your key request (auto-responded)")
+        print("   3. You receive their key (auto-imported)")
+        print("\n⏱️  Wait ~5-10 seconds for messages to arrive")
+        print(f"   Then check: pgp list")
+        print(f"   Then test:  pgp send {contact_name} Hello encrypted!")
     
     def trust_key_command(self, parts):
         """Import and trust a public key"""
