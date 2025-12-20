@@ -162,10 +162,18 @@ class Plugin:
                 expire_date=0  # Never expire
             )
             
-            print("Starting key generation...")
+            print("Key input parameters generated")
+            print("Starting key generation (please wait, this can take 30-60 seconds on mobile)...")
+            print("TIP: Move your device around to help generate randomness!")
+            
             key = self.gpg.gen_key(key_input)
             
-            if key and str(key):
+            print(f"\nKey generation completed. Result type: {type(key)}")
+            print(f"Key value: {key}")
+            print(f"Key as string: '{str(key)}'")
+            print(f"Key is truthy: {bool(key)}")
+            
+            if key and str(key) and str(key).strip():
                 self.my_key_id = str(key)
                 self.save_config()
                 self._print_success("PGP key pair generated!")
@@ -173,9 +181,16 @@ class Plugin:
                 print("\n" + "─"*60 + "\n")
             else:
                 self._print_error("Failed to generate key")
-                self._print_error(f"GPG stderr: {self.gpg.result.stderr}")
+                # Try to get error details
+                print(f"\nDebug - Key object details:")
+                print(f"  Type: {type(key)}")
+                print(f"  Value: {key}")
+                print(f"  String: '{str(key)}'")
+                if hasattr(key, '__dict__'):
+                    print(f"  Attributes: {key.__dict__}")
+                
                 print("\n💡 To retry manually, use: pgp keygen")
-                print("   Or check GPG installation with: gpg --version")
+                print("   Or try: gpg --gen-key (to test GPG directly)")
         except Exception as e:
             self._print_error(f"Key generation failed: {e}")
             import traceback
