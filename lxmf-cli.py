@@ -1539,7 +1539,8 @@ class LXMFClient:
                 source=self.destination,
                 content=content,
                 title=title or "",
-                desired_method=LXMF.LXMessage.DIRECT
+                desired_method=LXMF.LXMessage.DIRECT,
+                fields=fields
             )
 
             # Add custom LXMF fields if provided
@@ -3363,3 +3364,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
