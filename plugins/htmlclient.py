@@ -35,12 +35,28 @@ class Plugin:
         self._load_config()
         self.bookmarks = self._load_bookmarks()
         self.history = self._load_history()
+        self._check_termux_setup()
     
     def _init_storage(self):
         """Create storage directories"""
         for path in [self.html_path, self.cache_path, self.downloads_path]:
             if not os.path.exists(path):
                 os.makedirs(path)
+    
+    def _check_termux_setup(self):
+        """Check Termux browser setup"""
+        is_termux = os.path.exists('/data/data/com.termux')
+        
+        if is_termux:
+            import subprocess
+            try:
+                subprocess.run(['which', 'termux-open'], 
+                             capture_output=True, check=True, timeout=2)
+            except:
+                print("\n⚠️  Termux Setup Recommended:")
+                print("   Install termux-tools for auto-open browser:")
+                print("   pkg install termux-tools")
+                print("   Pages will still be saved without it.\n")
     
     def _load_config(self):
         """Load client configuration"""
@@ -115,6 +131,79 @@ class Plugin:
         self.history.append(entry)
         self._save_history()
     
+    def _open_browser(self, file_path):
+        """Open file in browser with Termux support"""
+        import subprocess
+        import platform
+        
+        try:
+            abs_path = os.path.abspath(file_path)
+            file_url = 'file://' + abs_path
+            
+            # Detect Termux
+            is_termux = os.path.exists('/data/data/com.termux')
+            
+            if is_termux:
+                # Termux: Use termux-open or am start
+                try:
+                    # Try termux-open first (requires termux-tools package)
+                    result = subprocess.run(
+                        ['termux-open', abs_path],
+                        capture_output=True,
+                        timeout=5
+                    )
+                    if result.returncode == 0:
+                        return True
+                except (subprocess.TimeoutExpired, FileNotFoundError):
+                    pass
+                
+                try:
+                    # Try Android intent via am
+                    subprocess.run([
+                        'am', 'start',
+                        '-a', 'android.intent.action.VIEW',
+                        '-d', file_url,
+                        '-t', 'text/html'
+                    ], capture_output=True, timeout=5)
+                    return True
+                except:
+                    pass
+                
+                # Fallback: try common Android browsers
+                browsers = [
+                    'com.android.chrome/.Main',
+                    'org.mozilla.firefox/.App',
+                    'com.brave.browser/.Main',
+                    'com.duckduckgo.mobile.android/.ui.main.MainActivity'
+                ]
+                
+                for browser in browsers:
+                    try:
+                        subprocess.run([
+                            'am', 'start',
+                            '-n', browser,
+                            '-a', 'android.intent.action.VIEW',
+                            '-d', file_url
+                        ], capture_output=True, timeout=5)
+                        return True
+                    except:
+                        continue
+                
+                return False
+            
+            else:
+                # Desktop: Use webbrowser module
+                if self.default_browser:
+                    browser = webbrowser.get(self.default_browser)
+                    browser.open(file_url)
+                else:
+                    webbrowser.open(file_url)
+                return True
+                
+        except Exception as e:
+            print(f"⚠ Browser open error: {e}")
+            return False
+    
     def _open_html(self, html_content, page_name="page.html", server_name=""):
         """Open HTML content in browser"""
         try:
@@ -146,12 +235,11 @@ Received: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
             
             # Open in browser
             if self.auto_open:
-                if self.default_browser:
-                    browser = webbrowser.get(self.default_browser)
-                    browser.open('file://' + os.path.abspath(cache_file))
+                opened = self._open_browser(cache_file)
+                if opened:
+                    print(f"✓ Opened in browser")
                 else:
-                    webbrowser.open('file://' + os.path.abspath(cache_file))
-                print(f"✓ Opened in browser")
+                    print(f"💡 Open manually: file://{os.path.abspath(cache_file)}")
             else:
                 print(f"💡 Open manually: file://{os.path.abspath(cache_file)}")
             
@@ -175,8 +263,9 @@ Received: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
             
             # Try to open
             if self.auto_open:
-                webbrowser.open('file://' + os.path.abspath(file_path))
-                print(f"✓ Opened in browser")
+                opened = self._open_browser(file_path)
+                if opened:
+                    print(f"✓ Opened in browser")
             
             return file_path
             
@@ -200,6 +289,8 @@ Received: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
                     page_name = "page.html"
                     if content.startswith("📄 Serving:"):
                         page_name = content.replace("📄 Serving:", "").strip()
+                    elif content.startswith("📑"):
+                        page_name = "index.html"
                     elif "404" in content:
                         page_name = "404.html"
                     
@@ -257,7 +348,7 @@ Received: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
         return False
     
     def _request_page(self, server, page_name):
-        """Request an HTML page from a server"""
+        """Request an HTML page or index from a server"""
         try:
             # Resolve server
             dest_hash = self.client.resolve_contact_or_hash(server)
@@ -267,7 +358,12 @@ Received: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
             
             server_name = self.client.format_contact_display_short(dest_hash)
             
-            print(f"\n📡 Requesting '{page_name}' from {server_name}...")
+            # Check if requesting index
+            if page_name.lower() in ['index', 'list', '']:
+                print(f"\n📡 Requesting page index from {server_name}...")
+                page_name = 'index'  # Server will understand this
+            else:
+                print(f"\n📡 Requesting '{page_name}' from {server_name}...")
             
             # Send request using custom field
             fields = {
@@ -414,7 +510,8 @@ Received: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
             print(f"[4] Default browser: {self.default_browser or 'System default'}")
             print(f"\n[5] Clear cache")
             print(f"[6] Clear history")
-            print(f"[7] Open cache folder")
+            print(f"[7] View history")
+            print(f"[8] Open cache folder")
             print(f"\n[b] Back")
             print(f"{'─'*width}")
             
@@ -459,6 +556,9 @@ Received: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
                     print("✓ History cleared")
             
             elif choice == '7':
+                self._show_history()
+            
+            elif choice == '8':
                 print(f"\n📂 Cache location: {self.cache_path}")
                 print(f"📂 Downloads: {self.downloads_path}")
                 print(f"\n💡 Open these in your file manager")
@@ -473,16 +573,17 @@ Received: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
             if len(parts) < 2:
                 print("\n💡 Usage: browse <server> [page]")
                 print("   Examples:")
+                print("     browse Alice              # Request page index")
                 print("     browse Alice index.html")
                 print("     br 5 about.html")
-                print("     htmlget Bob")
-                print("\n   Default page: index.html")
+                print("     browse Alice index        # Special: page listing")
+                print("\n   Default: Opens page index")
                 print("\n   Also supports bookmarks:")
                 print("     bookmarks - Manage bookmarks")
                 print("     browse #1 - Open bookmark #1\n")
             else:
                 server = parts[1]
-                page = parts[2] if len(parts) > 2 else "index.html"
+                page = parts[2] if len(parts) > 2 else "index"  # Default to index listing
                 
                 # Check if requesting bookmark
                 if server.startswith('#'):
