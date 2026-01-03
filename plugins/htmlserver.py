@@ -137,6 +137,114 @@ class Plugin:
         
         return html_content
     
+    def _generate_index_page(self):
+        """Generate dynamic index listing"""
+        pages = self._get_page_list()
+        
+        html = """<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Page Index</title>
+    <style>
+        body {
+            font-family: monospace;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            background: #1a1a1a;
+            color: #0f0;
+        }
+        h1 {
+            color: #0f0;
+            border-bottom: 2px solid #0f0;
+            padding-bottom: 10px;
+        }
+        .page-list {
+            list-style: none;
+            padding: 0;
+        }
+        .page-item {
+            background: #2a2a2a;
+            margin: 10px 0;
+            padding: 15px;
+            border-left: 3px solid #0f0;
+            border-radius: 3px;
+        }
+        .page-name {
+            color: #0ff;
+            font-size: 1.2em;
+            font-weight: bold;
+        }
+        .page-info {
+            color: #888;
+            font-size: 0.9em;
+            margin-top: 5px;
+        }
+        .stats {
+            background: #2a2a2a;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 20px 0;
+        }
+    </style>
+</head>
+<body>
+    <h1>📑 Available Pages</h1>
+    <div class="stats">
+        <strong>Total Pages:</strong> {{page_count}}<br>
+        <strong>Server Time:</strong> {{timestamp}}
+    </div>
+    <ul class="page-list">
+"""
+        
+        for page in pages:
+            page_path = os.path.join(self.pages_path, page)
+            size = os.path.getsize(page_path)
+            size_str = f"{size:,} bytes" if size < 1024 else f"{size/1024:.1f} KB"
+            
+            html += f"""
+        <li class="page-item">
+            <div class="page-name">📄 {page}</div>
+            <div class="page-info">Size: {size_str}</div>
+        </li>
+"""
+        
+        html += """
+    </ul>
+    <div class="stats">
+        <strong>Usage:</strong> Send "GET:&lt;page&gt;" to request any page
+    </div>
+</body>
+</html>"""
+        
+        # Replace template variables
+        html = html.replace('{{page_count}}', str(len(pages)))
+        html = html.replace('{{timestamp}}', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+        
+        return html
+    
+    def _send_index_list(self, requester):
+        """Send page index as text"""
+        pages = self._get_page_list()
+        
+        if not pages:
+            response = "📑 No pages available"
+        else:
+            response = f"📑 Available Pages ({len(pages)}):\n\n"
+            for i, page in enumerate(pages, 1):
+                page_path = os.path.join(self.pages_path, page)
+                size = os.path.getsize(page_path)
+                size_str = f"{size:,}B" if size < 1024 else f"{size/1024:.1f}KB"
+                response += f"[{i}] {page} ({size_str})\n"
+            
+            response += f"\n💡 Request: GET:<page>\nExample: GET:{pages[0]}"
+        
+        self.client.send_message(requester, response)
+        print(f"✓ Sent index to {self.client.format_contact_display_short(requester)}")
+        return True
+    
     def _serve_page_embedded(self, requester, page_name):
         """Serve HTML page as embedded content"""
         try:
@@ -245,6 +353,17 @@ class Plugin:
                     requester_name = self.client.format_contact_display_short(msg_data['source_hash'])
                     print(f"\n📡 HTML Request from {requester_name}: {page_name}")
                     
+                    # Special handling for index request
+                    if page_name.lower() in ['index', 'list', '']:
+                        html_index = self._generate_index_page()
+                        self.client.send_message(
+                            msg_data['source_hash'],
+                            "📑 Page Index",
+                            fields={self.FIELD_HTML_CONTENT: html_index}
+                        )
+                        self._log_access(msg_data['source_hash'], "INDEX", True)
+                        return True
+                    
                     if self.transfer_mode == "embedded":
                         self._serve_page_embedded(msg_data['source_hash'], page_name)
                     else:
@@ -252,12 +371,33 @@ class Plugin:
                     
                     return True  # Suppress normal notification
             
-            # Also support text-based requests: "GET:page.html"
+            # Text-based requests
+            lower_content = content.lower()
+            
+            # Handle index/list requests
+            if lower_content in ['index', 'list', 'pages', 'dir', 'ls']:
+                requester_name = self.client.format_contact_display_short(msg_data['source_hash'])
+                print(f"\n📡 Index request from {requester_name}")
+                self._send_index_list(msg_data['source_hash'])
+                return True
+            
+            # Handle GET requests
             if content.startswith("GET:") or content.startswith("get:"):
                 page_name = content[4:].strip()
                 
                 requester_name = self.client.format_contact_display_short(msg_data['source_hash'])
                 print(f"\n📡 HTML Request from {requester_name}: {page_name}")
+                
+                # Check for index request
+                if page_name.lower() in ['index', 'list', '']:
+                    html_index = self._generate_index_page()
+                    self.client.send_message(
+                        msg_data['source_hash'],
+                        "📑 Page Index",
+                        fields={self.FIELD_HTML_CONTENT: html_index}
+                    )
+                    self._log_access(msg_data['source_hash'], "INDEX", True)
+                    return True
                 
                 if self.transfer_mode == "embedded":
                     self._serve_page_embedded(msg_data['source_hash'], page_name)
@@ -288,8 +428,8 @@ class Plugin:
         print(f"Authentication: {'REQUIRED' if self.require_auth else 'OPEN'}")
         print(f"\n📂 Pages directory: {self.pages_path}")
         print(f"📊 Available pages: {len(self._get_page_list())}")
-        print(f"\n💡 Request format:")
-        print(f"   Text: Send 'GET:page.html'")
+        print(f"\n💡 Request formats:")
+        print(f"   Text: Send 'GET:page.html' or 'index' for listing")
         print(f"   Field: Use FIELD_HTML_REQUEST (11)")
         print(f"{'─'*width}\n")
     
