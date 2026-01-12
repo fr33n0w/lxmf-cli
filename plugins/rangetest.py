@@ -454,17 +454,39 @@ class Plugin:
                 del self.active_tests[source_hash]
             if source_hash in self.test_threads:
                 del self.test_threads[source_hash]
-    
+
     def send_gps_response(self, source_hash, current, total):
         """AUTO-REPLY with GPS when we receive a ping (MOBILE CLIENT)"""
         print(f"\n{'='*60}")
-        print(f"📍 GPS AUTO-REPLY [{current}/{total}]")
+        print(f"📍 GPS AUTO-REPLY TRIGGERED [{current}/{total}]")
         print(f"{'='*60}")
+        
+        # Debug: Check environment
+        print(f"[DEBUG] Python version: {sys.version}")
+        print(f"[DEBUG] Working directory: {os.getcwd()}")
+        print(f"[DEBUG] PATH: {os.environ.get('PATH', 'NOT SET')[:100]}...")
+        
+        # Check if termux-location exists
+        try:
+            which_result = subprocess.run(
+                ['which', 'termux-location'],
+                capture_output=True,
+                text=True,
+                timeout=2
+            )
+            if which_result.returncode == 0:
+                print(f"[DEBUG] termux-location found at: {which_result.stdout.strip()}")
+            else:
+                print(f"[DEBUG] termux-location NOT in PATH!")
+        except Exception as e:
+            print(f"[DEBUG] Error checking termux-location: {e}")
         
         timestamp = datetime.now().strftime('%H:%M:%S')
         
         # Get GPS location with best provider
+        print(f"[DEBUG] Calling get_gps_location()...")
         gps_data = self.get_gps_location()
+        print(f"[DEBUG] get_gps_location() returned: {gps_data}")
         
         if gps_data:
             lat = gps_data.get('latitude')
@@ -496,17 +518,17 @@ class Plugin:
             msg += f"🕐 {timestamp}\n"
             msg += f"⚠️ GPS unavailable"
             
-            print(f"⚠️ GPS unavailable")
+            print(f"⚠️ GPS unavailable - no data returned")
         
         # Send GPS response
         try:
             self.client.send_message(source_hash, msg)
-            print(f"✅ Sent")
+            print(f"✅ Message sent")
         except Exception as e:
-            print(f"❌ Failed: {e}")
+            print(f"❌ Failed to send: {e}")
         
-        print(f"{'='*60}\n")
-    
+        print(f"{'='*60}\n")    
+
     def get_gps_location(self):
         """Get GPS location using -r best (automatic provider selection)"""
         system = platform.system()
@@ -514,56 +536,97 @@ class Plugin:
         
         try:
             if is_termux:
-                # TERMUX/ANDROID - use -r best for automatic provider selection
-                print("[GPS] Using termux-location -r best...")
+                print("[GPS] Getting location...")
                 
                 try:
+                    # IMPORTANT: Use full path and proper environment
+                    termux_location_path = '/data/data/com.termux/files/usr/bin/termux-location'
+                    
+                    # Check if command exists
+                    if not os.path.exists(termux_location_path):
+                        # Fallback to PATH search
+                        termux_location_path = 'termux-location'
+                    
+                    # Run with explicit environment and shell
                     result = subprocess.run(
-                        ['termux-location', '-r', 'best'],
+                        [termux_location_path, '-r', 'best'],
                         capture_output=True,
                         text=True,
-                        timeout=5  # 5 second timeout
+                        timeout=8,  # Increased timeout
+                        env=os.environ.copy(),  # Use parent environment
+                        shell=False
                     )
                     
-                    if result.returncode == 0 and result.stdout.strip():
+                    print(f"[GPS] Command completed with return code: {result.returncode}")
+                    
+                    # Check stderr for errors
+                    if result.stderr:
+                        stderr_clean = result.stderr.strip()
+                        if stderr_clean:
+                            print(f"[GPS] Stderr: {stderr_clean}")
+                    
+                    # Check stdout
+                    if result.stdout:
+                        stdout_clean = result.stdout.strip()
+                        print(f"[GPS] Got output ({len(stdout_clean)} chars)")
+                        
+                        if not stdout_clean:
+                            print("[GPS] Output is empty")
+                            return None
+                        
                         try:
-                            data = json.loads(result.stdout)
+                            data = json.loads(stdout_clean)
                             
                             # Validate we got real coordinates
                             if 'latitude' in data and 'longitude' in data:
                                 lat = data.get('latitude')
                                 lon = data.get('longitude')
                                 
-                                # Check for valid coordinates (not 0,0)
-                                if lat and lon and (abs(lat) > 0.001 or abs(lon) > 0.001):
-                                    provider = data.get('provider', 'unknown')
-                                    accuracy = data.get('accuracy', 0)
-                                    print(f"[GPS] ✅ Got location via {provider} (±{accuracy:.0f}m)")
-                                    return data
+                                # Check for valid coordinates
+                                if lat is not None and lon is not None:
+                                    if abs(lat) > 0.001 or abs(lon) > 0.001:
+                                        provider = data.get('provider', 'unknown')
+                                        accuracy = data.get('accuracy', 0)
+                                        print(f"[GPS] ✅ Success: {lat:.6f}, {lon:.6f} via {provider} (±{accuracy:.0f}m)")
+                                        return data
+                                    else:
+                                        print(f"[GPS] Invalid coordinates: ({lat}, {lon})")
                                 else:
-                                    print("[GPS] Invalid coordinates (0,0)")
+                                    print(f"[GPS] Null coordinates")
                             else:
-                                print("[GPS] No lat/lon in response")
+                                print(f"[GPS] Missing lat/lon in response")
+                                print(f"[GPS] Keys found: {list(data.keys())}")
                         
                         except json.JSONDecodeError as e:
-                            print(f"[GPS] JSON error: {e}")
+                            print(f"[GPS] JSON parse error: {e}")
+                            print(f"[GPS] Raw output: {stdout_clean[:200]}")
                     else:
-                        print(f"[GPS] Command failed or no output")
-                
+                        print(f"[GPS] No stdout output")
+                    
+                    return None
+                    
                 except subprocess.TimeoutExpired:
-                    print("[GPS] Timeout after 5s")
+                    print("[GPS] Timeout after 8 seconds")
+                    return None
                 except FileNotFoundError:
-                    print("[GPS] termux-location not found! Install: pkg install termux-api")
+                    print("[GPS] termux-location command not found!")
+                    print("[GPS] Tried path: termux-location")
+                    return None
                 except Exception as e:
-                    print(f"[GPS] Error: {e}")
+                    print(f"[GPS] Exception: {type(e).__name__}: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    return None
             
             elif system == 'Linux':
                 # LINUX - try gpsd
+                print("[GPS] Trying gpsd on Linux...")
                 try:
                     import gpsd  # type: ignore
                     gpsd.connect()
                     packet = gpsd.get_current()
                     if packet.mode >= 2:  # 2D or 3D fix
+                        print(f"[GPS] ✅ gpsd success")
                         return {
                             'latitude': packet.lat,
                             'longitude': packet.lon,
@@ -579,8 +642,10 @@ class Plugin:
         
         except Exception as e:
             print(f"[GPS] Unexpected error: {e}")
+            import traceback
+            traceback.print_exc()
         
-        return None
+        return None    
     
     def notify_range_ping(self, current, total):
         """Notify user of received ping (MOBILE CLIENT)"""
