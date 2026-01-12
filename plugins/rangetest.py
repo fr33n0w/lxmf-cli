@@ -527,6 +527,9 @@ class Plugin:
         system = platform.system()
         is_termux = os.path.exists('/data/data/com.termux')
         
+        print(f"[GPS DEBUG] is_termux: {is_termux}")
+        print(f"[GPS DEBUG] system: {system}")
+        
         try:
             if is_termux:
                 # Try providers in order: network (fast), gps (accurate), passive (cached)
@@ -540,43 +543,74 @@ class Plugin:
                     print(f"[GPS] Trying {description}...")
                     
                     try:
+                        # Full command for debugging
+                        cmd = ['termux-location', '-p', provider]
+                        print(f"[GPS DEBUG] Command: {' '.join(cmd)}")
+                        print(f"[GPS DEBUG] Timeout: {timeout}s")
+                        
                         result = subprocess.run(
-                            ['termux-location', '-p', provider],
+                            cmd,
                             capture_output=True,
                             text=True,
                             timeout=timeout,
                             env=os.environ.copy()
                         )
                         
+                        print(f"[GPS DEBUG] Return code: {result.returncode}")
+                        print(f"[GPS DEBUG] Stdout length: {len(result.stdout)} chars")
+                        print(f"[GPS DEBUG] Stderr length: {len(result.stderr)} chars")
+                        
+                        if result.stderr:
+                            print(f"[GPS DEBUG] Stderr: {result.stderr[:200]}")
+                        
                         if result.returncode == 0 and result.stdout:
                             stdout_clean = result.stdout.strip()
+                            print(f"[GPS DEBUG] Stdout preview: {stdout_clean[:200]}")
                             
                             try:
                                 data = json.loads(stdout_clean)
+                                print(f"[GPS DEBUG] JSON parsed successfully")
+                                print(f"[GPS DEBUG] Keys: {list(data.keys())}")
                                 
                                 # Validate coordinates
                                 if 'latitude' in data and 'longitude' in data:
                                     lat = data.get('latitude')
                                     lon = data.get('longitude')
                                     
+                                    print(f"[GPS DEBUG] Lat: {lat}, Lon: {lon}")
+                                    
                                     if lat is not None and lon is not None:
                                         if abs(lat) > 0.001 or abs(lon) > 0.001:
                                             accuracy = data.get('accuracy', 0)
                                             print(f"[GPS] ✅ Success via {provider}: {lat:.6f}, {lon:.6f} (±{accuracy:.0f}m)")
                                             return data
+                                        else:
+                                            print(f"[GPS DEBUG] Coordinates too close to 0,0")
+                                    else:
+                                        print(f"[GPS DEBUG] Lat or Lon is None")
+                                else:
+                                    print(f"[GPS DEBUG] Missing latitude or longitude keys")
                             
-                            except json.JSONDecodeError:
+                            except json.JSONDecodeError as e:
+                                print(f"[GPS DEBUG] JSON decode error: {e}")
                                 continue
+                        else:
+                            print(f"[GPS DEBUG] Command failed or no stdout")
                     
                     except subprocess.TimeoutExpired:
-                        print(f"[GPS] {provider} timeout")
+                        print(f"[GPS] {provider} timeout after {timeout}s")
                         continue
+                    except FileNotFoundError:
+                        print(f"[GPS DEBUG] termux-location command not found!")
+                        return None
                     except Exception as e:
-                        print(f"[GPS] {provider} error: {e}")
+                        print(f"[GPS] {provider} error: {type(e).__name__}: {e}")
+                        import traceback
+                        traceback.print_exc()
                         continue
                 
                 # All providers failed
-                print("[GPS] All providers failed")
+                print("[GPS DEBUG] All providers exhausted")
                 return None
             
             elif system == 'Linux':
@@ -601,9 +635,11 @@ class Plugin:
                     print(f"[GPS] gpsd error: {e}")
         
         except Exception as e:
-            print(f"[GPS] Unexpected error: {e}")
+            print(f"[GPS DEBUG] Unexpected error: {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
         
-        return None    
+        return None
     
     def notify_range_ping(self, current, total):
         """Notify user of received ping (MOBILE CLIENT)"""
