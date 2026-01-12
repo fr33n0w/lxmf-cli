@@ -395,22 +395,25 @@ class Plugin:
             contact = self.client.format_contact_display_short(client_hash)
             print(f"\n⚠️ Stopping test with {contact}\n")
             self.client.send_message(client_hash, "⚠️ Range test stopped by server")
-    
+
     def get_gps_location(self):
         """Get GPS location"""
         is_termux = os.path.exists('/data/data/com.termux')
         
         if not is_termux:
+            print(f"[GPS] Not on Termux")
             return None
         
         try:
             providers = [
-                ('network', 5, 'Network'),
-                ('gps', 8, 'GPS'),
-                ('passive', 2, 'Cached')
+                ('network', 5, 'Network (WiFi/Cell)'),
+                ('gps', 8, 'GPS Satellite'),
+                ('passive', 2, 'Cached Location')
             ]
             
             for provider, timeout, desc in providers:
+                print(f"[GPS] Trying {desc}...")
+                
                 try:
                     result = subprocess.run(
                         ['termux-location', '-p', provider],
@@ -420,27 +423,58 @@ class Plugin:
                         env=os.environ.copy()
                     )
                     
+                    print(f"[GPS] Return code: {result.returncode}")
+                    
                     if result.returncode == 0 and result.stdout:
-                        data = json.loads(result.stdout.strip())
+                        stdout_clean = result.stdout.strip()
+                        print(f"[GPS] Got {len(stdout_clean)} chars")
                         
-                        if 'latitude' in data and 'longitude' in data:
-                            lat = data.get('latitude')
-                            lon = data.get('longitude')
+                        try:
+                            data = json.loads(stdout_clean)
                             
-                            if lat and lon and (abs(lat) > 0.001 or abs(lon) > 0.001):
-                                data['provider'] = provider
-                                return data
+                            if 'latitude' in data and 'longitude' in data:
+                                lat = data.get('latitude')
+                                lon = data.get('longitude')
+                                
+                                if lat and lon and (abs(lat) > 0.001 or abs(lon) > 0.001):
+                                    acc = data.get('accuracy', 0)
+                                    data['provider'] = provider
+                                    print(f"[GPS] ✅ Success via {provider}")
+                                    print(f"[GPS]    {lat:.6f}, {lon:.6f} (±{acc:.0f}m)")
+                                    return data
+                                else:
+                                    print(f"[GPS] Invalid coords (too close to 0,0)")
+                            else:
+                                print(f"[GPS] Missing lat/lon keys")
+                        
+                        except json.JSONDecodeError as e:
+                            print(f"[GPS] JSON error: {e}")
+                            if result.stderr:
+                                print(f"[GPS] Stderr: {result.stderr.strip()}")
+                            continue
+                    else:
+                        print(f"[GPS] Failed or no output")
+                        if result.stderr:
+                            print(f"[GPS] Stderr: {result.stderr.strip()}")
                 
                 except subprocess.TimeoutExpired:
+                    print(f"[GPS] {provider} timeout after {timeout}s")
                     continue
-                except Exception:
+                except FileNotFoundError:
+                    print(f"[GPS] termux-location not found!")
+                    return None
+                except Exception as e:
+                    print(f"[GPS] {provider} error: {e}")
                     continue
             
+            print("[GPS] All providers failed")
             return None
         
         except Exception as e:
-            print(f"[GPS] Error: {e}")
-            return None
+            print(f"[GPS] Unexpected error: {e}")
+            import traceback
+            traceback.print_exc()
+            return None    
     
     def notify_range_ping(self, current, total):
         """Notify user"""
