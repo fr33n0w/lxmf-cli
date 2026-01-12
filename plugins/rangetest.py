@@ -22,11 +22,16 @@ class Plugin:
         
         # Store last completed test info for file retrieval
         self.last_completed_tests = {}  # {source_hash: {'json_path': ..., 'kml_path': ...}}
-        
+
     def on_message(self, message, msg_data):
         """Handle incoming range test commands and responses"""
         content = msg_data['content'].strip()
         source_hash = msg_data['source_hash']
+        
+        # === DEBUG: Log all incoming messages ===
+        print(f"\n[DEBUG] Received message:")
+        print(f"[DEBUG] Content preview: {content[:100]}")
+        print(f"[DEBUG] Starts with '📡 RANGE TEST ['? {content.startswith('📡 RANGE TEST [')}")
         
         # === DETECT IF WE'RE THE FIXED NODE (SERVER) ===
         
@@ -73,13 +78,17 @@ class Plugin:
         # === DETECT IF WE'RE THE MOBILE NODE (CLIENT) ===
         
         # We received a ping - auto-reply with GPS
-        elif content.startswith('📡 RANGE TEST ['):
+        # Check for the ping pattern
+        if '📡 RANGE TEST [' in content or 'RANGE TEST [' in content:
+            print(f"[DEBUG] Detected range test ping!")
             try:
                 # Extract message number
                 match = re.search(r'\[(\d+)/(\d+)\]', content)
                 if match:
                     current = int(match.group(1))
                     total = int(match.group(2))
+                    
+                    print(f"[DEBUG] Extracted: ping {current}/{total}")
                     
                     # Auto-reply with GPS (NO user action needed!)
                     self.send_gps_response(source_hash, current, total)
@@ -89,6 +98,8 @@ class Plugin:
                     
                     # Let the message show normally too
                     return False
+                else:
+                    print(f"[DEBUG] Could not extract ping numbers from: {content}")
             except Exception as e:
                 print(f"[Range Test] Error handling ping: {e}")
                 import traceback
@@ -142,7 +153,7 @@ class Plugin:
             self.handle_file_receive(source_hash, content)
             return True
         
-        return False
+        return False        
     
     def handle_file_request(self, source_hash, content):
         """Handle request to send KML/JSON files"""
