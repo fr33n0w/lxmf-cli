@@ -13,7 +13,7 @@ class Plugin:
     def __init__(self, client):
         self.client = client
         self.commands = ['rangetest', 'rangestop', 'rangestatus', 'rangegetlogs']
-        self.description = "Range testing - incremental GPS logging"
+        self.description = "Range testing - incremental GPS logging with HTML map"
         
         # PHONE MODE - receives pings, logs GPS
         self.active_tests = {}  # Tests where WE receive pings
@@ -117,7 +117,7 @@ class Plugin:
                             # WRITE TO FILES IMMEDIATELY
                             test = self.active_tests[source_hash]
                             self.append_to_json(test['json_path'], gps_point)
-                            self.append_to_kml(test['kml_path'], gps_point, current == 1, current == total)
+                            self.append_to_html(test['html_path'], gps_point, current == 1, current == total)
                             
                             print(f"[GPS] ✅ Logged: {lat:.6f}, {lon:.6f} (±{acc:.0f}m)")
                             print(f"[GPS] 💾 Written to files")
@@ -258,10 +258,10 @@ class Plugin:
         safe_name = "".join(c for c in server_name if c.isalnum() or c in (' ', '-', '_')).strip() or "server"
         
         json_file = f"rangetest_{safe_name}_{timestamp}.json"
-        kml_file = f"rangetest_{safe_name}_{timestamp}.kml"
+        html_file = f"rangetest_{safe_name}_{timestamp}.html"
         
         json_path = os.path.join(log_dir, json_file)
-        kml_path = os.path.join(log_dir, kml_file)
+        html_path = os.path.join(log_dir, html_file)
         
         # Initialize JSON
         with open(json_path, 'w') as f:
@@ -274,8 +274,8 @@ class Plugin:
                 'gps_points': []
             }, f, indent=2)
         
-        # Initialize KML
-        self.init_kml_file(kml_path, server_name)
+        # Initialize HTML map
+        self.init_html_file(html_path, server_name)
         
         self.active_tests[server_hash] = {
             'count': count,
@@ -283,7 +283,7 @@ class Plugin:
             'received': 0,
             'start_time': time.time(),
             'json_path': json_path,
-            'kml_path': kml_path,
+            'html_path': html_path,
             'server_name': server_name
         }
         
@@ -295,86 +295,287 @@ class Plugin:
         print(f"📍 GPS: Incremental logging")
         print(f"💾 Files:")
         print(f"   {json_file}")
-        print(f"   {kml_file}")
+        print(f"   {html_file}")
         print(f"{'─'*70}\n")
     
-    def init_kml_file(self, filepath, server_name):
-        """Initialize KML"""
-        kml = f'''<?xml version="1.0" encoding="UTF-8"?>
-<kml xmlns="http://www.opengis.net/kml/2.2">
-  <Document>
-    <name>Range Test - {server_name}</name>
-    <description>LXMF Range Test - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</description>
+    def init_html_file(self, filepath, server_name):
+        """Initialize self-contained HTML map file"""
+        html = f'''<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Range Test - {server_name}</title>
+    <style>
+        body {{
+            margin: 0;
+            padding: 0;
+            font-family: Arial, sans-serif;
+        }}
+        #map {{
+            position: absolute;
+            top: 0;
+            bottom: 100px;
+            width: 100%;
+        }}
+        #info {{
+            position: absolute;
+            bottom: 0;
+            width: 100%;
+            height: 100px;
+            background: rgba(255, 255, 255, 0.95);
+            padding: 15px;
+            box-sizing: border-box;
+            border-top: 3px solid #0078d4;
+            overflow-y: auto;
+        }}
+        .stat {{
+            display: inline-block;
+            margin-right: 20px;
+            margin-bottom: 5px;
+            font-size: 14px;
+        }}
+        .stat-label {{
+            font-weight: bold;
+            color: #0078d4;
+        }}
+        .legend {{
+            background: white;
+            padding: 10px;
+            border-radius: 5px;
+            box-shadow: 0 1px 5px rgba(0,0,0,0.4);
+        }}
+        .legend-item {{
+            margin: 5px 0;
+            font-size: 12px;
+        }}
+        @media (max-width: 600px) {{
+            #info {{
+                height: 120px;
+            }}
+            .stat {{
+                display: block;
+                margin: 3px 0;
+            }}
+        }}
+    </style>
     
-    <Style id="lineStyle">
-      <LineStyle>
-        <color>ff0000ff</color>
-        <width>4</width>
-      </LineStyle>
-    </Style>
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     
-    <Placemark>
-      <name>GPS Track</name>
-      <styleUrl>#lineStyle</styleUrl>
-      <LineString>
-        <altitudeMode>absolute</altitudeMode>
-        <coordinates>
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+</head>
+<body>
+    <div id="map"></div>
+    <div id="info">
+        <div class="stat"><span class="stat-label">Server:</span> <span id="server">{server_name}</span></div>
+        <div class="stat"><span class="stat-label">Started:</span> <span id="start">{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</span></div>
+        <div class="stat"><span class="stat-label">Points:</span> <span id="points">0</span></div>
+        <div class="stat"><span class="stat-label">Distance:</span> <span id="distance">0 km</span></div>
+        <div class="stat"><span class="stat-label">Max Speed:</span> <span id="maxspeed">0 km/h</span></div>
+        <div class="stat"><span class="stat-label">Last Update:</span> <span id="lastupdate">-</span></div>
+    </div>
+
+    <script>
+        // Initialize map - default center (will auto-adjust to points)
+        var map = L.map('map').setView([45.0, 7.0], 13);
+        
+        // Add OpenStreetMap tiles
+        L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
+            maxZoom: 19,
+            attribution: '© OpenStreetMap contributors'
+        }}).addTo(map);
+        
+        // Initialize layers
+        var polyline = L.polyline([], {{
+            color: 'red',
+            weight: 4,
+            opacity: 0.7
+        }}).addTo(map);
+        
+        var markers = [];
+        var gpsPoints = [];
+        var maxSpeed = 0;
+        
+        // Marker icons
+        var startIcon = L.divIcon({{
+            className: 'custom-marker',
+            html: '<div style="background-color: #00ff00; width: 14px; height: 14px; border-radius: 50%; border: 3px solid white; box-shadow: 0 0 4px rgba(0,0,0,0.5);"></div>',
+            iconSize: [14, 14],
+            iconAnchor: [7, 7]
+        }});
+        
+        var pointIcon = L.divIcon({{
+            className: 'custom-marker',
+            html: '<div style="background-color: #0078d4; width: 10px; height: 10px; border-radius: 50%; border: 2px solid white; box-shadow: 0 0 3px rgba(0,0,0,0.5);"></div>',
+            iconSize: [10, 10],
+            iconAnchor: [5, 5]
+        }});
+        
+        var endIcon = L.divIcon({{
+            className: 'custom-marker',
+            html: '<div style="background-color: #ff0000; width: 14px; height: 14px; border-radius: 50%; border: 3px solid white; box-shadow: 0 0 4px rgba(0,0,0,0.5);"></div>',
+            iconSize: [14, 14],
+            iconAnchor: [7, 7]
+        }});
+        
+        // Legend
+        var legend = L.control({{position: 'topright'}});
+        legend.onAdd = function(map) {{
+            var div = L.DomUtil.create('div', 'legend');
+            div.innerHTML = '<div style="font-weight: bold; margin-bottom: 5px;">Range Test</div>' +
+                          '<div class="legend-item">🟢 Start Point</div>' +
+                          '<div class="legend-item">🔵 GPS Points</div>' +
+                          '<div class="legend-item">🔴 End Point</div>' +
+                          '<div class="legend-item">━━ Path</div>';
+            return div;
+        }};
+        legend.addTo(map);
+        
+        // Haversine distance calculation
+        function calculateDistance(lat1, lon1, lat2, lon2) {{
+            var R = 6371; // Earth radius in km
+            var dLat = (lat2 - lat1) * Math.PI / 180;
+            var dLon = (lon2 - lon1) * Math.PI / 180;
+            var a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+                    Math.sin(dLon/2) * Math.sin(dLon/2);
+            var c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+            return R * c;
+        }}
+        
+        // Add point function
+        function addPoint(lat, lon, index, time, speed, accuracy) {{
+            var point = [lat, lon];
+            gpsPoints.push(point);
+            
+            // Update polyline
+            polyline.setLatLngs(gpsPoints);
+            
+            // Track max speed
+            if (speed > maxSpeed) {{
+                maxSpeed = speed;
+            }}
+            
+            // Add marker
+            var icon = (index === 1) ? startIcon : pointIcon;
+            var marker = L.marker(point, {{icon: icon}}).addTo(map);
+            marker.bindPopup(
+                '<b>Ping #' + index + '</b><br>' +
+                'Time: ' + time + '<br>' +
+                'Speed: ' + speed.toFixed(1) + ' km/h<br>' +
+                'Accuracy: ±' + accuracy.toFixed(0) + 'm<br>' +
+                'Lat: ' + lat.toFixed(6) + '<br>' +
+                'Lon: ' + lon.toFixed(6)
+            );
+            markers.push(marker);
+            
+            // Calculate total distance
+            var totalDist = 0;
+            for (var i = 1; i < gpsPoints.length; i++) {{
+                totalDist += calculateDistance(
+                    gpsPoints[i-1][0], gpsPoints[i-1][1],
+                    gpsPoints[i][0], gpsPoints[i][1]
+                );
+            }}
+            
+            // Update stats
+            document.getElementById('points').textContent = gpsPoints.length;
+            document.getElementById('distance').textContent = totalDist.toFixed(2) + ' km';
+            document.getElementById('maxspeed').textContent = maxSpeed.toFixed(1) + ' km/h';
+            document.getElementById('lastupdate').textContent = time;
+            
+            // Fit map to show all points with padding
+            if (gpsPoints.length > 0) {{
+                map.fitBounds(polyline.getBounds(), {{padding: [50, 50]}});
+            }}
+        }}
+        
+        // Mark end point
+        function markEndPoint() {{
+            if (markers.length > 0) {{
+                // Remove last marker and replace with end icon
+                map.removeLayer(markers[markers.length - 1]);
+                var lastPoint = gpsPoints[gpsPoints.length - 1];
+                var endMarker = L.marker(lastPoint, {{icon: endIcon}}).addTo(map);
+                endMarker.bindPopup('<b>END</b><br>Final Position<br>Total Points: ' + gpsPoints.length);
+                markers[markers.length - 1] = endMarker;
+            }}
+        }}
+        
+        // GPS POINTS DATA WILL BE INSERTED HERE
+        // POINTS_START
 '''
         
         with open(filepath, 'w') as f:
-            f.write(kml)
+            f.write(html)
     
     def append_to_json(self, json_path, gps_point):
-        """Append GPS to JSON"""
+        """Append GPS point to JSON file"""
         try:
+            # Read current data
             with open(json_path, 'r') as f:
                 data = json.load(f)
             
+            # Append new point
             data['gps_points'].append(gps_point)
             
+            # Write back
             with open(json_path, 'w') as f:
                 json.dump(data, f, indent=2)
         
         except Exception as e:
             print(f"[JSON] ⚠️ Error: {e}")
     
-    def append_to_kml(self, kml_path, gps_point, is_first, is_last):
-        """Append GPS to KML"""
+    def append_to_html(self, html_path, gps_point, is_first, is_last):
+        """Append GPS point to HTML file"""
         try:
-            with open(kml_path, 'a') as f:
-                f.write(f"          {gps_point['lon']},{gps_point['lat']},{gps_point.get('altitude', 0)}\n")
+            # Create JavaScript line to add point
+            js_line = f"        addPoint({gps_point['lat']}, {gps_point['lon']}, {gps_point['index']}, '{gps_point['time']}', {gps_point['speed']:.1f}, {gps_point['accuracy']:.0f});\n"
             
+            # Read file
+            with open(html_path, 'r') as f:
+                content = f.read()
+            
+            # Insert point before POINTS_START marker
+            if '// POINTS_START' in content:
+                content = content.replace('// POINTS_START', js_line + '// POINTS_START')
+            
+            # Write back
+            with open(html_path, 'w') as f:
+                f.write(content)
+            
+            # If last point, finalize
             if is_last:
-                self.finalize_kml(kml_path, gps_point)
+                self.finalize_html(html_path)
         
         except Exception as e:
-            print(f"[KML] ⚠️ Error: {e}")
+            print(f"[HTML] ⚠️ Error: {e}")
     
-    def finalize_kml(self, kml_path, last_point=None):
-        """Close KML"""
+    def finalize_html(self, html_path):
+        """Finalize HTML file"""
         try:
-            with open(kml_path, 'a') as f:
-                f.write('''        </coordinates>
-      </LineString>
-    </Placemark>
-''')
-                
-                if last_point:
-                    f.write(f'''    
-    <Placemark>
-      <name>END</name>
-      <description>Last ping - {last_point.get('time', 'N/A')}</description>
-      <Point>
-        <coordinates>{last_point['lon']},{last_point['lat']},{last_point.get('altitude', 0)}</coordinates>
-      </Point>
-    </Placemark>
-''')
-                
-                f.write('''  </Document>
-</kml>''')
+            with open(html_path, 'r') as f:
+                content = f.read()
+            
+            # Add end marker call
+            end_js = "\n        markEndPoint();\n"
+            content = content.replace('// POINTS_START', end_js + '// POINTS_START')
+            
+            # Close script and body tags
+            closing = '''
+    </script>
+</body>
+</html>'''
+            
+            content += closing
+            
+            with open(html_path, 'w') as f:
+                f.write(content)
         
         except Exception as e:
-            print(f"[KML] Error: {e}")
+            print(f"[HTML] ⚠️ Finalize error: {e}")
     
     def complete_test(self, server_hash):
         """PHONE - Test complete"""
@@ -389,11 +590,13 @@ class Plugin:
         print(f"⏱️ Duration: {int(elapsed/60)}m {int(elapsed%60)}s")
         print(f"💾 Files:")
         print(f"   {os.path.basename(test['json_path'])}")
-        print(f"   {os.path.basename(test['kml_path'])}")
+        print(f"   {os.path.basename(test['html_path'])}")
         print(f"{'─'*70}")
-        print(f"\n💡 Copy to shared storage:")
-        print(f"   cp {test['kml_path']} /sdcard/Download/")
-        print(f"\n💡 Open in Google Earth!\n")
+        print(f"\n💡 Copy HTML to shared storage:")
+        print(f"   cp {test['html_path']} /sdcard/Download/")
+        print(f"\n💡 Open in browser:")
+        print(f"   termux-open {test['html_path']}")
+        print(f"\n🗺️ Interactive map ready!\n")
         
         del self.active_tests[server_hash]
     
@@ -403,9 +606,9 @@ class Plugin:
             return
         
         test = self.active_tests[server_hash]
-        self.finalize_kml(test['kml_path'])
+        self.finalize_html(test['html_path'])
         
-        print(f"\n⚠️ Test stopped")
+        print(f"\n⚠️ Test stopped early")
         print(f"📊 Received: {test['received']}/{test['count']}")
         print(f"💾 Files saved\n")
         
@@ -415,11 +618,12 @@ class Plugin:
         """PC - Stop sending"""
         if phone_hash in self.server_tests:
             self.server_tests[phone_hash]['stop_flag'].set()
-            print(f"\n⚠️ Stopping ping sequence\n")
-            self.client.send_message(phone_hash, "⚠️ Test stopped")
+            contact = self.client.format_contact_display_short(phone_hash)
+            print(f"\n⚠️ Stopping ping sequence for {contact}\n")
+            self.client.send_message(phone_hash, "⚠️ Test stopped by server")
     
     def get_gps_location(self):
-        """Get GPS"""
+        """Get GPS location"""
         is_termux = os.path.exists('/data/data/com.termux')
         
         if not is_termux:
@@ -449,36 +653,46 @@ class Plugin:
                                 data['provider'] = provider
                                 return data
                 
-                except:
+                except (subprocess.TimeoutExpired, json.JSONDecodeError):
+                    continue
+                except Exception:
                     continue
             
             return None
-        except:
+        
+        except Exception:
             return None
     
     def notify_ping(self, current, total):
-        """Notify"""
+        """Notify user of ping received"""
         is_termux = os.path.exists('/data/data/com.termux')
         
         try:
             if is_termux:
                 os.system('termux-vibrate -d 100 2>/dev/null &')
-                os.system(f'termux-notification --title "📡 Ping {current}/{total}" --content "GPS saved!" 2>/dev/null &')
+                os.system(f'termux-notification --title "📡 Ping {current}/{total}" --content "GPS saved to map!" 2>/dev/null &')
         except:
             pass
     
     def handle_command(self, cmd, parts):
-        """Commands"""
+        """Handle local commands"""
         if cmd == 'rangetest':
             if self.server_tests:
-                print("\n🏠 PC MODE - Sending pings")
+                print("\n🏠 PC MODE - Sending Pings")
+                print("─"*70)
                 for h, c in self.server_tests.items():
-                    print(f"  {self.client.format_contact_display_short(h)}: {c['current']}/{c['count']}")
+                    contact = self.client.format_contact_display_short(h)
+                    print(f"  {contact}: {c['current']}/{c['count']} sent")
+                print("─"*70 + "\n")
             elif self.active_tests:
                 print("\n📱 PHONE MODE - Logging GPS")
+                print("─"*70)
                 for h, c in self.active_tests.items():
-                    print(f"  {self.client.format_contact_display_short(h)}: {c['received']}/{c['count']}")
-                    print(f"     {os.path.basename(c['json_path'])}")
+                    contact = self.client.format_contact_display_short(h)
+                    print(f"  {contact}: {c['received']}/{c['count']} received")
+                    print(f"     JSON: {os.path.basename(c['json_path'])}")
+                    print(f"     HTML: {os.path.basename(c['html_path'])}")
+                print("─"*70 + "\n")
             else:
                 print("\n📡 No active tests\n")
         
@@ -487,39 +701,66 @@ class Plugin:
             print("─"*70)
             gps = self.get_gps_location()
             if gps:
-                print(f"✅ Available: {gps['latitude']:.6f}, {gps['longitude']:.6f} (±{gps.get('accuracy', 0):.0f}m)")
+                print(f"✅ GPS Available")
+                print(f"   Latitude:  {gps['latitude']:.6f}")
+                print(f"   Longitude: {gps['longitude']:.6f}")
+                print(f"   Accuracy:  ±{gps.get('accuracy', 0):.0f}m")
+                print(f"   Provider:  {gps.get('provider', 'unknown')}")
+                if gps.get('speed', 0) > 0:
+                    print(f"   Speed:     {gps['speed']:.1f} km/h")
             else:
-                print("❌ Unavailable")
+                print("❌ GPS Unavailable")
+                print("\n   For Termux:")
+                print("   • pkg install termux-api")
+                print("   • Install Termux:API from F-Droid")
+                print("   • Grant location permission in Settings")
             print("─"*70 + "\n")
         
         elif cmd == 'rangegetlogs':
             log_dir = os.path.join(self.client.storage_path, "rangetest_logs")
             if os.path.exists(log_dir):
-                files = [f for f in os.listdir(log_dir) if f.endswith(('.kml', '.json'))]
+                files = sorted([f for f in os.listdir(log_dir) if f.endswith(('.html', '.json'))], reverse=True)
                 if files:
-                    print("\n📁 Logs:")
+                    print("\n📁 Range Test Logs:")
                     print("─"*70)
-                    for f in sorted(files, reverse=True):
-                        print(f"  {f} ({os.path.getsize(os.path.join(log_dir, f))} bytes)")
+                    for f in files:
+                        path = os.path.join(log_dir, f)
+                        size = os.path.getsize(path)
+                        print(f"  {f} ({size:,} bytes)")
                     print("─"*70)
-                    print(f"\n💡 Copy: cp {log_dir}/*.kml /sdcard/Download/\n")
+                    print(f"\nLog directory: {log_dir}")
+                    print(f"\n💡 Copy to shared storage:")
+                    print(f"   cp {log_dir}/*.html /sdcard/Download/")
+                    print(f"\n💡 Open latest map:")
+                    latest_html = next((f for f in files if f.endswith('.html')), None)
+                    if latest_html:
+                        print(f"   termux-open {log_dir}/{latest_html}")
+                    print(f"\n💡 Share file:")
+                    if latest_html:
+                        print(f"   termux-share {log_dir}/{latest_html}\n")
                 else:
-                    print("\n📁 No logs\n")
+                    print("\n📁 No logs found\n")
             else:
-                print("\n📁 No logs\n")
+                print("\n📁 No logs directory found\n")
         
         elif cmd == 'rangestop':
             if len(parts) < 2:
-                print("💡 Usage: rangestop <contact>")
+                print("\n💡 Usage: rangestop <contact>\n")
+                print("Example:")
+                print("  rangestop HomePC")
+                print("  rangestop 1\n")
             else:
                 target = ' '.join(parts[1:])
                 dest_hash = self.client.resolve_contact_or_hash(target)
                 if dest_hash:
                     if dest_hash in self.server_tests:
                         self.stop_server(dest_hash)
+                        print(f"✅ Stopped sending pings")
                     elif dest_hash in self.active_tests:
                         self.finalize_test(dest_hash)
+                        self.client.send_message(dest_hash, "⚠️ Test stopped by mobile")
+                        print(f"✅ Test stopped, files saved")
                     else:
-                        print("❌ No active test")
+                        print(f"❌ No active test with {target}")
                 else:
-                    print(f"❌ Unknown: {target}")
+                    print(f"❌ Unknown contact: {target}")
