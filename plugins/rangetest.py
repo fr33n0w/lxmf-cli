@@ -15,19 +15,22 @@ class Plugin:
         self.commands = ['rangetest', 'rangestop', 'rangestatus', 'rangegetlogs']
         self.description = "Range testing - incremental GPS logging"
         
-        # Server mode (PC) - sends pings
-        self.active_server_tests = {}
-        self.server_threads = {}
+        # PHONE MODE - receives pings, logs GPS
+        self.active_tests = {}  # Tests where WE receive pings
         
-        # Client mode (Mobile) - receives pings and logs GPS incrementally
-        self.active_client_tests = {}
+        # PC MODE - sends pings
+        self.server_tests = {}
+        self.server_threads = {}
         
     def on_message(self, message, msg_data):
         """Handle incoming messages"""
         content = msg_data['content'].strip()
         source_hash = msg_data['source_hash']
         
-        # === MOBILE SENDS COMMAND TO PC ===
+        # === PC RECEIVES COMMAND FROM PHONE ===
+        # Phone: "send PC rangetest 50 15"
+        # PC receives this
+        
         if content.lower().startswith('rangetest '):
             try:
                 parts = content.split()
@@ -43,35 +46,40 @@ class Plugin:
                         self.client.send_message(source_hash, "❌ Interval must be 5-300 seconds")
                         return True
                     
-                    # Start as CLIENT (mobile - logs GPS incrementally)
-                    self.start_as_client(source_hash, count, interval)
+                    # PC BECOMES SERVER - sends pings
+                    self.start_server(source_hash, count, interval)
                     return True
             except ValueError:
                 self.client.send_message(source_hash, "❌ Invalid numbers")
                 return True
         
-        # === PC CONFIRMS READY ===
-        elif 'RANGE TEST READY' in content:
+        # === PHONE RECEIVES CONFIRMATION FROM PC ===
+        # PC: "I'm starting to send pings"
+        # Phone receives this
+        
+        elif 'STARTING PING SEQUENCE' in content:
             try:
-                count_match = re.search(r'Expecting (\d+) pings', content)
-                interval_match = re.search(r'interval: (\d+)s', content)
+                count_match = re.search(r'Sending (\d+) pings', content)
+                interval_match = re.search(r'@ (\d+)s', content)
                 
                 if count_match and interval_match:
                     count = int(count_match.group(1))
                     interval = int(interval_match.group(1))
                     
                     contact = self.client.format_contact_display_short(source_hash)
-                    print(f"\n[Range Test] 📱 {contact} ready!")
-                    print(f"[Range Test] 🚀 Starting ping sequence...\n")
+                    print(f"\n[Range Test] 🏠 {contact} starting ping sequence!\n")
                     
-                    self.start_as_server(source_hash, count, interval)
+                    # PHONE PREPARES TO RECEIVE AND LOG
+                    self.start_client(source_hash, count, interval, contact)
             except Exception as e:
                 print(f"[Range Test] Error: {e}")
             
             return True
         
-        # === MOBILE RECEIVES PING ===
-        if source_hash in self.active_client_tests:
+        # === PHONE RECEIVES PING FROM PC ===
+        # PC sends ping, phone receives it
+        
+        if source_hash in self.active_tests:
             if '📡 RANGE TEST [' in content or 'RANGE TEST [' in content:
                 try:
                     match = re.search(r'\[(\d+)/(\d+)\]', content)
@@ -83,7 +91,7 @@ class Plugin:
                         print(f"📡 PING #{current}/{total} RECEIVED")
                         print(f"{'='*60}")
                         
-                        # Get GPS
+                        # Get GPS and save immediately
                         timestamp = datetime.now().strftime('%H:%M:%S')
                         gps_data = self.get_gps_location()
                         
@@ -107,28 +115,28 @@ class Plugin:
                             }
                             
                             # WRITE TO FILES IMMEDIATELY
-                            test = self.active_client_tests[source_hash]
+                            test = self.active_tests[source_hash]
                             self.append_to_json(test['json_path'], gps_point)
                             self.append_to_kml(test['kml_path'], gps_point, current == 1, current == total)
                             
                             print(f"[GPS] ✅ Logged: {lat:.6f}, {lon:.6f} (±{acc:.0f}m)")
                             print(f"[GPS] 💾 Written to files")
                         else:
-                            print(f"[GPS] ⚠️ GPS unavailable - ping logged without location")
+                            print(f"[GPS] ⚠️ GPS unavailable")
                         
                         # Update count
-                        self.active_client_tests[source_hash]['received'] = current
+                        self.active_tests[source_hash]['received'] = current
                         
                         # Notify
-                        self.notify_range_ping(current, total)
+                        self.notify_ping(current, total)
                         
                         print(f"{'='*60}\n")
                         
                         # Check if complete
                         if current >= total:
-                            self.complete_client_test(source_hash)
+                            self.complete_test(source_hash)
                         
-                        return False  # Show ping message
+                        return False
                 
                 except Exception as e:
                     print(f"[Range Test] Error: {e}")
@@ -137,234 +145,24 @@ class Plugin:
         
         # === STOP COMMAND ===
         elif content.lower() == 'rangestop':
-            if source_hash in self.active_server_tests:
-                self.stop_server_test(source_hash)
-            elif source_hash in self.active_client_tests:
-                self.finalize_client_test(source_hash)
-                self.client.send_message(source_hash, "⚠️ Range test stopped - files saved")
+            if source_hash in self.server_tests:
+                self.stop_server(source_hash)
+            elif source_hash in self.active_tests:
+                self.finalize_test(source_hash)
+                self.client.send_message(source_hash, "⚠️ Test stopped - files saved")
             else:
                 self.client.send_message(source_hash, "❌ No active test")
             return True
         
         return False
     
-    def start_as_client(self, server_hash, count, interval):
-        """Start as CLIENT (mobile) - create files and prepare for incremental logging"""
-        contact = self.client.format_contact_display_short(server_hash)
+    def start_server(self, phone_hash, count, interval):
+        """PC MODE - Start sending pings"""
         
-        # Create log directory
-        log_dir = os.path.join(self.client.storage_path, "rangetest_logs")
-        os.makedirs(log_dir, exist_ok=True)
+        if phone_hash in self.server_tests:
+            self.stop_server(phone_hash)
         
-        # Create file names
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        safe_name = "".join(c for c in contact if c.isalnum() or c in (' ', '-', '_')).strip() or "server"
-        
-        json_file = f"rangetest_{safe_name}_{timestamp}.json"
-        kml_file = f"rangetest_{safe_name}_{timestamp}.kml"
-        
-        json_path = os.path.join(log_dir, json_file)
-        kml_path = os.path.join(log_dir, kml_file)
-        
-        # Initialize JSON file
-        with open(json_path, 'w') as f:
-            json.dump({
-                'server': contact,
-                'timestamp': timestamp,
-                'test_start': datetime.now().isoformat(),
-                'expected_pings': count,
-                'interval': interval,
-                'gps_points': []
-            }, f, indent=2)
-        
-        # Initialize KML file
-        self.init_kml_file(kml_path, contact)
-        
-        self.active_client_tests[server_hash] = {
-            'count': count,
-            'interval': interval,
-            'received': 0,
-            'start_time': time.time(),
-            'json_path': json_path,
-            'kml_path': kml_path,
-            'server_name': contact
-        }
-        
-        print(f"\n{'─'*70}")
-        print(f"📱 RANGE TEST - CLIENT MODE (Mobile)")
-        print(f"{'─'*70}")
-        print(f"📡 Server: {contact}")
-        print(f"📊 Expecting: {count} pings @ {interval}s interval")
-        print(f"⏱️ Duration: ~{(count * interval) // 60}m {(count * interval) % 60}s")
-        print(f"📍 GPS: Incremental logging")
-        print(f"💾 Files created:")
-        print(f"   {json_file}")
-        print(f"   {kml_file}")
-        print(f"{'─'*70}\n")
-        
-        # Send confirmation
-        self.client.send_message(
-            server_hash,
-            f"✅ RANGE TEST READY\n\n"
-            f"📱 Mobile ready\n"
-            f"📊 Expecting {count} pings @ interval: {interval}s\n"
-            f"📍 Incremental GPS logging active\n\n"
-            f"🚀 Start sending pings!"
-        )
-        
-        print(f"✅ Sent READY to {contact}")
-        print(f"📍 Waiting for pings...\n")
-    
-    def init_kml_file(self, filepath, server_name):
-        """Initialize KML file with header"""
-        kml = f'''<?xml version="1.0" encoding="UTF-8"?>
-<kml xmlns="http://www.opengis.net/kml/2.2">
-  <Document>
-    <name>Range Test - {server_name}</name>
-    <description>LXMF Range Test - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</description>
-    
-    <Style id="lineStyle">
-      <LineStyle>
-        <color>ff0000ff</color>
-        <width>4</width>
-      </LineStyle>
-    </Style>
-    
-    <Style id="pingPoint">
-      <IconStyle>
-        <color>ff00ff00</color>
-        <scale>0.8</scale>
-      </IconStyle>
-    </Style>
-    
-    <Placemark>
-      <name>GPS Track</name>
-      <styleUrl>#lineStyle</styleUrl>
-      <LineString>
-        <altitudeMode>absolute</altitudeMode>
-        <coordinates>
-'''
-        
-        with open(filepath, 'w') as f:
-            f.write(kml)
-    
-    def append_to_json(self, json_path, gps_point):
-        """Append GPS point to JSON file"""
-        try:
-            # Read current data
-            with open(json_path, 'r') as f:
-                data = json.load(f)
-            
-            # Append new point
-            data['gps_points'].append(gps_point)
-            
-            # Write back
-            with open(json_path, 'w') as f:
-                json.dump(data, f, indent=2)
-        
-        except Exception as e:
-            print(f"[JSON] ⚠️ Error: {e}")
-    
-    def append_to_kml(self, kml_path, gps_point, is_first, is_last):
-        """Append GPS point to KML file"""
-        try:
-            # Append coordinate to LineString
-            with open(kml_path, 'a') as f:
-                lon = gps_point['lon']
-                lat = gps_point['lat']
-                alt = gps_point.get('altitude', 0)
-                f.write(f"          {lon},{lat},{alt}\n")
-            
-            # If last point, close the file properly
-            if is_last:
-                self.finalize_kml(kml_path, gps_point)
-        
-        except Exception as e:
-            print(f"[KML] ⚠️ Error: {e}")
-    
-    def finalize_kml(self, kml_path, last_point=None):
-        """Close KML file properly"""
-        try:
-            with open(kml_path, 'a') as f:
-                f.write('''        </coordinates>
-      </LineString>
-    </Placemark>
-''')
-                
-                # Add end marker if we have the last point
-                if last_point:
-                    f.write(f'''    
-    <Placemark>
-      <name>END</name>
-      <description>Last ping - {last_point.get('time', 'N/A')}</description>
-      <styleUrl>#pingPoint</styleUrl>
-      <Point>
-        <coordinates>{last_point['lon']},{last_point['lat']},{last_point.get('altitude', 0)}</coordinates>
-      </Point>
-    </Placemark>
-''')
-                
-                f.write('''  </Document>
-</kml>''')
-        
-        except Exception as e:
-            print(f"[KML] ⚠️ Finalize error: {e}")
-    
-    def complete_client_test(self, server_hash):
-        """Complete test - finalize files"""
-        test = self.active_client_tests[server_hash]
-        
-        # Finalize KML if not already done
-        # (last point already finalized it, but this is a safety check)
-        
-        elapsed = time.time() - test['start_time']
-        
-        print(f"\n{'─'*70}")
-        print(f"🎉 RANGE TEST COMPLETE!")
-        print(f"{'─'*70}")
-        print(f"📡 Server: {test['server_name']}")
-        print(f"📊 Pings received: {test['received']}/{test['count']}")
-        print(f"⏱️ Duration: {int(elapsed/60)}m {int(elapsed%60)}s")
-        print(f"💾 Files saved:")
-        print(f"   {os.path.basename(test['json_path'])}")
-        print(f"   {os.path.basename(test['kml_path'])}")
-        print(f"{'─'*70}")
-        print(f"\n💡 Copy to shared storage:")
-        print(f"   cp {test['kml_path']} /sdcard/Download/")
-        print(f"\n💡 Open in Google Earth on your phone!\n")
-        
-        # Cleanup
-        del self.active_client_tests[server_hash]
-        
-        # Notify server
-        self.client.send_message(server_hash, 
-            f"✅ Test complete!\n"
-            f"📊 Received: {test['received']}/{test['count']}\n"
-            f"💾 Files saved on mobile")
-    
-    def finalize_client_test(self, server_hash):
-        """Finalize test early (e.g., manual stop)"""
-        if server_hash not in self.active_client_tests:
-            return
-        
-        test = self.active_client_tests[server_hash]
-        
-        # Close KML file
-        self.finalize_kml(test['kml_path'])
-        
-        print(f"\n⚠️ Test stopped early")
-        print(f"📊 Received: {test['received']}/{test['count']} pings")
-        print(f"💾 Files saved:\n   {os.path.basename(test['json_path'])}\n   {os.path.basename(test['kml_path'])}\n")
-        
-        del self.active_client_tests[server_hash]
-    
-    def start_as_server(self, client_hash, count, interval):
-        """Start as SERVER (PC) - just send pings"""
-        
-        if client_hash in self.active_server_tests:
-            self.stop_server_test(client_hash)
-        
-        self.active_server_tests[client_hash] = {
+        self.server_tests[phone_hash] = {
             'count': count,
             'interval': interval,
             'current': 0,
@@ -372,29 +170,38 @@ class Plugin:
             'stop_flag': threading.Event()
         }
         
-        contact = self.client.format_contact_display_short(client_hash)
+        contact = self.client.format_contact_display_short(phone_hash)
         
         print(f"\n{'─'*70}")
-        print(f"🏠 RANGE TEST - SERVER MODE (Fixed)")
+        print(f"🏠 PC MODE - Sending Pings (Fixed Station)")
         print(f"{'─'*70}")
         print(f"📱 Mobile: {contact}")
         print(f"📊 Pings: {count} @ {interval}s interval")
         print(f"⏱️ Duration: ~{(count * interval) // 60}m {(count * interval) % 60}s")
         print(f"{'─'*70}\n")
         
+        # Notify phone
+        self.client.send_message(
+            phone_hash,
+            f"✅ STARTING PING SEQUENCE\n\n"
+            f"📡 Sending {count} pings @ {interval}s\n"
+            f"⏱️ Duration: ~{(count * interval) // 60}m {(count * interval) % 60}s\n\n"
+            f"📍 Prepare to log GPS!"
+        )
+        
         # Start thread
         thread = threading.Thread(
             target=self._server_worker,
-            args=(client_hash,),
+            args=(phone_hash,),
             daemon=True
         )
-        self.server_threads[client_hash] = thread
+        self.server_threads[phone_hash] = thread
         thread.start()
     
-    def _server_worker(self, client_hash):
-        """Server worker - sends pings"""
-        test = self.active_server_tests[client_hash]
-        contact = self.client.format_contact_display_short(client_hash)
+    def _server_worker(self, phone_hash):
+        """PC worker - sends pings"""
+        test = self.server_tests[phone_hash]
+        contact = self.client.format_contact_display_short(phone_hash)
         
         try:
             while test['current'] < test['count']:
@@ -416,7 +223,7 @@ class Plugin:
                 msg += f"📊 Progress: {int((current/total)*100)}%"
                 
                 print(f"[Range Test] 📡 Ping {current}/{total} → {contact}")
-                self.client.send_message(client_hash, msg)
+                self.client.send_message(phone_hash, msg)
                 
                 # Wait
                 for _ in range(test['interval']):
@@ -426,43 +233,202 @@ class Plugin:
             # Complete
             if not test['stop_flag'].is_set():
                 print(f"\n[Range Test] ✅ Ping sequence complete\n")
-                self.client.send_message(client_hash, 
+                self.client.send_message(phone_hash, 
                     f"✅ PING SEQUENCE COMPLETE\n"
-                    f"📊 Sent {test['current']}/{test['count']} pings\n"
-                    f"📍 Check your mobile for GPS logs!")
+                    f"📊 Sent {test['current']}/{test['count']} pings")
         
         except Exception as e:
             print(f"\n❌ Server error: {e}\n")
         
         finally:
-            if client_hash in self.active_server_tests:
-                del self.active_server_tests[client_hash]
-            if client_hash in self.server_threads:
-                del self.server_threads[client_hash]
+            if phone_hash in self.server_tests:
+                del self.server_tests[phone_hash]
+            if phone_hash in self.server_threads:
+                del self.server_threads[phone_hash]
     
-    def stop_server_test(self, client_hash):
-        """Stop server"""
-        if client_hash in self.active_server_tests:
-            self.active_server_tests[client_hash]['stop_flag'].set()
-            contact = self.client.format_contact_display_short(client_hash)
-            print(f"\n⚠️ Stopping test with {contact}\n")
-            self.client.send_message(client_hash, "⚠️ Test stopped by server")
+    def start_client(self, server_hash, count, interval, server_name):
+        """PHONE MODE - Prepare to receive pings and log GPS"""
+        
+        # Create log directory
+        log_dir = os.path.join(self.client.storage_path, "rangetest_logs")
+        os.makedirs(log_dir, exist_ok=True)
+        
+        # Create file names
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        safe_name = "".join(c for c in server_name if c.isalnum() or c in (' ', '-', '_')).strip() or "server"
+        
+        json_file = f"rangetest_{safe_name}_{timestamp}.json"
+        kml_file = f"rangetest_{safe_name}_{timestamp}.kml"
+        
+        json_path = os.path.join(log_dir, json_file)
+        kml_path = os.path.join(log_dir, kml_file)
+        
+        # Initialize JSON
+        with open(json_path, 'w') as f:
+            json.dump({
+                'server': server_name,
+                'timestamp': timestamp,
+                'test_start': datetime.now().isoformat(),
+                'expected_pings': count,
+                'interval': interval,
+                'gps_points': []
+            }, f, indent=2)
+        
+        # Initialize KML
+        self.init_kml_file(kml_path, server_name)
+        
+        self.active_tests[server_hash] = {
+            'count': count,
+            'interval': interval,
+            'received': 0,
+            'start_time': time.time(),
+            'json_path': json_path,
+            'kml_path': kml_path,
+            'server_name': server_name
+        }
+        
+        print(f"\n{'─'*70}")
+        print(f"📱 PHONE MODE - Receiving Pings (Mobile)")
+        print(f"{'─'*70}")
+        print(f"📡 Server: {server_name}")
+        print(f"📊 Expecting: {count} pings @ {interval}s")
+        print(f"📍 GPS: Incremental logging")
+        print(f"💾 Files:")
+        print(f"   {json_file}")
+        print(f"   {kml_file}")
+        print(f"{'─'*70}\n")
+    
+    def init_kml_file(self, filepath, server_name):
+        """Initialize KML"""
+        kml = f'''<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+  <Document>
+    <name>Range Test - {server_name}</name>
+    <description>LXMF Range Test - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</description>
+    
+    <Style id="lineStyle">
+      <LineStyle>
+        <color>ff0000ff</color>
+        <width>4</width>
+      </LineStyle>
+    </Style>
+    
+    <Placemark>
+      <name>GPS Track</name>
+      <styleUrl>#lineStyle</styleUrl>
+      <LineString>
+        <altitudeMode>absolute</altitudeMode>
+        <coordinates>
+'''
+        
+        with open(filepath, 'w') as f:
+            f.write(kml)
+    
+    def append_to_json(self, json_path, gps_point):
+        """Append GPS to JSON"""
+        try:
+            with open(json_path, 'r') as f:
+                data = json.load(f)
+            
+            data['gps_points'].append(gps_point)
+            
+            with open(json_path, 'w') as f:
+                json.dump(data, f, indent=2)
+        
+        except Exception as e:
+            print(f"[JSON] ⚠️ Error: {e}")
+    
+    def append_to_kml(self, kml_path, gps_point, is_first, is_last):
+        """Append GPS to KML"""
+        try:
+            with open(kml_path, 'a') as f:
+                f.write(f"          {gps_point['lon']},{gps_point['lat']},{gps_point.get('altitude', 0)}\n")
+            
+            if is_last:
+                self.finalize_kml(kml_path, gps_point)
+        
+        except Exception as e:
+            print(f"[KML] ⚠️ Error: {e}")
+    
+    def finalize_kml(self, kml_path, last_point=None):
+        """Close KML"""
+        try:
+            with open(kml_path, 'a') as f:
+                f.write('''        </coordinates>
+      </LineString>
+    </Placemark>
+''')
+                
+                if last_point:
+                    f.write(f'''    
+    <Placemark>
+      <name>END</name>
+      <description>Last ping - {last_point.get('time', 'N/A')}</description>
+      <Point>
+        <coordinates>{last_point['lon']},{last_point['lat']},{last_point.get('altitude', 0)}</coordinates>
+      </Point>
+    </Placemark>
+''')
+                
+                f.write('''  </Document>
+</kml>''')
+        
+        except Exception as e:
+            print(f"[KML] Error: {e}")
+    
+    def complete_test(self, server_hash):
+        """PHONE - Test complete"""
+        test = self.active_tests[server_hash]
+        elapsed = time.time() - test['start_time']
+        
+        print(f"\n{'─'*70}")
+        print(f"🎉 RANGE TEST COMPLETE!")
+        print(f"{'─'*70}")
+        print(f"📡 Server: {test['server_name']}")
+        print(f"📊 Received: {test['received']}/{test['count']}")
+        print(f"⏱️ Duration: {int(elapsed/60)}m {int(elapsed%60)}s")
+        print(f"💾 Files:")
+        print(f"   {os.path.basename(test['json_path'])}")
+        print(f"   {os.path.basename(test['kml_path'])}")
+        print(f"{'─'*70}")
+        print(f"\n💡 Copy to shared storage:")
+        print(f"   cp {test['kml_path']} /sdcard/Download/")
+        print(f"\n💡 Open in Google Earth!\n")
+        
+        del self.active_tests[server_hash]
+    
+    def finalize_test(self, server_hash):
+        """PHONE - Stop early"""
+        if server_hash not in self.active_tests:
+            return
+        
+        test = self.active_tests[server_hash]
+        self.finalize_kml(test['kml_path'])
+        
+        print(f"\n⚠️ Test stopped")
+        print(f"📊 Received: {test['received']}/{test['count']}")
+        print(f"💾 Files saved\n")
+        
+        del self.active_tests[server_hash]
+    
+    def stop_server(self, phone_hash):
+        """PC - Stop sending"""
+        if phone_hash in self.server_tests:
+            self.server_tests[phone_hash]['stop_flag'].set()
+            print(f"\n⚠️ Stopping ping sequence\n")
+            self.client.send_message(phone_hash, "⚠️ Test stopped")
     
     def get_gps_location(self):
-        """Get GPS location"""
+        """Get GPS"""
         is_termux = os.path.exists('/data/data/com.termux')
         
         if not is_termux:
             return None
         
         try:
-            providers = [
-                ('network', 5, 'Network'),
-                ('gps', 8, 'GPS'),
-                ('passive', 2, 'Cached')
-            ]
+            providers = [('network', 5), ('gps', 8), ('passive', 2)]
             
-            for provider, timeout, desc in providers:
+            for provider, timeout in providers:
                 try:
                     result = subprocess.run(
                         ['termux-location', '-p', provider],
@@ -483,17 +449,14 @@ class Plugin:
                                 data['provider'] = provider
                                 return data
                 
-                except (subprocess.TimeoutExpired, json.JSONDecodeError):
-                    continue
-                except Exception:
+                except:
                     continue
             
             return None
-        
-        except Exception:
+        except:
             return None
     
-    def notify_range_ping(self, current, total):
+    def notify_ping(self, current, total):
         """Notify"""
         is_termux = os.path.exists('/data/data/com.termux')
         
@@ -505,17 +468,17 @@ class Plugin:
             pass
     
     def handle_command(self, cmd, parts):
-        """Handle commands"""
+        """Commands"""
         if cmd == 'rangetest':
-            if self.active_server_tests:
-                print("\n📡 SERVER MODE - Sending pings")
-                for h, c in self.active_server_tests.items():
+            if self.server_tests:
+                print("\n🏠 PC MODE - Sending pings")
+                for h, c in self.server_tests.items():
                     print(f"  {self.client.format_contact_display_short(h)}: {c['current']}/{c['count']}")
-            elif self.active_client_tests:
-                print("\n📡 CLIENT MODE - Logging GPS")
-                for h, c in self.active_client_tests.items():
+            elif self.active_tests:
+                print("\n📱 PHONE MODE - Logging GPS")
+                for h, c in self.active_tests.items():
                     print(f"  {self.client.format_contact_display_short(h)}: {c['received']}/{c['count']}")
-                    print(f"     Files: {os.path.basename(c['json_path'])}")
+                    print(f"     {os.path.basename(c['json_path'])}")
             else:
                 print("\n📡 No active tests\n")
         
@@ -524,39 +487,26 @@ class Plugin:
             print("─"*70)
             gps = self.get_gps_location()
             if gps:
-                print(f"✅ GPS Available")
-                print(f"   Lat: {gps['latitude']:.6f}")
-                print(f"   Lon: {gps['longitude']:.6f}")
-                print(f"   Accuracy: ±{gps.get('accuracy', 0):.0f}m")
-                print(f"   Provider: {gps.get('provider', 'unknown')}")
+                print(f"✅ Available: {gps['latitude']:.6f}, {gps['longitude']:.6f} (±{gps.get('accuracy', 0):.0f}m)")
             else:
-                print("❌ GPS Unavailable")
+                print("❌ Unavailable")
             print("─"*70 + "\n")
         
         elif cmd == 'rangegetlogs':
-            # Show local logs
             log_dir = os.path.join(self.client.storage_path, "rangetest_logs")
             if os.path.exists(log_dir):
                 files = [f for f in os.listdir(log_dir) if f.endswith(('.kml', '.json'))]
                 if files:
-                    print("\n📁 Range Test Logs:")
+                    print("\n📁 Logs:")
                     print("─"*70)
                     for f in sorted(files, reverse=True):
-                        path = os.path.join(log_dir, f)
-                        size = os.path.getsize(path)
-                        print(f"  {f} ({size} bytes)")
+                        print(f"  {f} ({os.path.getsize(os.path.join(log_dir, f))} bytes)")
                     print("─"*70)
-                    print(f"\nPath: {log_dir}")
-                    print(f"\n💡 Copy to phone storage:")
-                    print(f"   cp {log_dir}/*.kml /sdcard/Download/")
-                    print(f"\n💡 View latest:")
-                    if files:
-                        latest_kml = sorted([f for f in files if f.endswith('.kml')], reverse=True)[0]
-                        print(f"   termux-open {log_dir}/{latest_kml}\n")
+                    print(f"\n💡 Copy: cp {log_dir}/*.kml /sdcard/Download/\n")
                 else:
-                    print("\n📁 No logs found\n")
+                    print("\n📁 No logs\n")
             else:
-                print("\n📁 No logs directory\n")
+                print("\n📁 No logs\n")
         
         elif cmd == 'rangestop':
             if len(parts) < 2:
@@ -565,11 +515,10 @@ class Plugin:
                 target = ' '.join(parts[1:])
                 dest_hash = self.client.resolve_contact_or_hash(target)
                 if dest_hash:
-                    if dest_hash in self.active_server_tests:
-                        self.stop_server_test(dest_hash)
-                    elif dest_hash in self.active_client_tests:
-                        self.finalize_client_test(dest_hash)
-                        print("⚠️ Client test stopped - files saved")
+                    if dest_hash in self.server_tests:
+                        self.stop_server(dest_hash)
+                    elif dest_hash in self.active_tests:
+                        self.finalize_test(dest_hash)
                     else:
                         print("❌ No active test")
                 else:
