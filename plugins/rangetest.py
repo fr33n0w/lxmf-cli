@@ -127,7 +127,7 @@ class Plugin:
                         self.active_tests[source_hash]['gps_log'].append(gps_point)
                         
                         contact = self.client.format_contact_display_short(source_hash)
-                        print(f"[Range Test] 📍 GPS #{current} received from {contact}")
+                        print(f"[Range Test] 📍 GPS #{current} received from {contact} (±{gps_point['accuracy']:.0f}m)")
                         
                         # Don't show the full GPS message to user
                         return True
@@ -330,7 +330,7 @@ class Plugin:
             print(f"From: {contact}")
             print(f"File: {filename}")
             print(f"Type: {file_type}")
-            print(f"Size: {filesize} bytes")
+            print(f"Size: {filesize} bytes ({filesize/1024:.1f} KB)")
             print(f"Saved: {filepath}")
             print(f"{'─'*70}\n")
             
@@ -457,9 +457,14 @@ class Plugin:
     
     def send_gps_response(self, source_hash, current, total):
         """AUTO-REPLY with GPS when we receive a ping (MOBILE CLIENT)"""
-        gps_data = self.get_gps_location()
+        print(f"\n{'='*60}")
+        print(f"📍 GPS AUTO-REPLY [{current}/{total}]")
+        print(f"{'='*60}")
         
         timestamp = datetime.now().strftime('%H:%M:%S')
+        
+        # Get GPS location with best provider
+        gps_data = self.get_gps_location()
         
         if gps_data:
             lat = gps_data.get('latitude')
@@ -467,6 +472,7 @@ class Plugin:
             accuracy = gps_data.get('accuracy', 0)
             speed = gps_data.get('speed', 0)
             altitude = gps_data.get('altitude', 0)
+            provider = gps_data.get('provider', 'unknown')
             
             msg = f"📍 GPS RESPONSE [{current}/{total}]\n"
             msg += f"🕐 {timestamp}\n"
@@ -482,39 +488,74 @@ class Plugin:
             
             msg += f"\n🗺️ https://maps.google.com/?q={lat},{lon}"
             
-            print(f"[Range Test] 📍 Sending GPS {current}/{total}")
+            print(f"✅ GPS: {lat:.6f}, {lon:.6f} (±{accuracy:.0f}m via {provider})")
+            print(f"📤 Sending response...")
         else:
             # GPS unavailable
             msg = f"📍 GPS RESPONSE [{current}/{total}]\n"
             msg += f"🕐 {timestamp}\n"
             msg += f"⚠️ GPS unavailable"
-            print(f"[Range Test] ⚠️ GPS unavailable for ping {current}/{total}")
+            
+            print(f"⚠️ GPS unavailable")
         
         # Send GPS response
-        self.client.send_message(source_hash, msg)
+        try:
+            self.client.send_message(source_hash, msg)
+            print(f"✅ Sent")
+        except Exception as e:
+            print(f"❌ Failed: {e}")
+        
+        print(f"{'='*60}\n")
     
     def get_gps_location(self):
-        """Get GPS location (cross-platform)"""
+        """Get GPS location using -r best (automatic provider selection)"""
         system = platform.system()
         is_termux = os.path.exists('/data/data/com.termux')
         
         try:
             if is_termux:
-                # TERMUX/ANDROID - use termux-location
-                result = subprocess.run(
-                    ['termux-location', '-p', 'gps'],
-                    capture_output=True,
-                    text=True,
-                    timeout=5
-                )
-                if result.returncode == 0 and result.stdout.strip():
-                    data = json.loads(result.stdout)
-                    # Check if we got valid data
-                    if 'latitude' in data and 'longitude' in data:
-                        return data
+                # TERMUX/ANDROID - use -r best for automatic provider selection
+                print("[GPS] Using termux-location -r best...")
+                
+                try:
+                    result = subprocess.run(
+                        ['termux-location', '-r', 'best'],
+                        capture_output=True,
+                        text=True,
+                        timeout=5  # 5 second timeout
+                    )
+                    
+                    if result.returncode == 0 and result.stdout.strip():
+                        try:
+                            data = json.loads(result.stdout)
+                            
+                            # Validate we got real coordinates
+                            if 'latitude' in data and 'longitude' in data:
+                                lat = data.get('latitude')
+                                lon = data.get('longitude')
+                                
+                                # Check for valid coordinates (not 0,0)
+                                if lat and lon and (abs(lat) > 0.001 or abs(lon) > 0.001):
+                                    provider = data.get('provider', 'unknown')
+                                    accuracy = data.get('accuracy', 0)
+                                    print(f"[GPS] ✅ Got location via {provider} (±{accuracy:.0f}m)")
+                                    return data
+                                else:
+                                    print("[GPS] Invalid coordinates (0,0)")
+                            else:
+                                print("[GPS] No lat/lon in response")
+                        
+                        except json.JSONDecodeError as e:
+                            print(f"[GPS] JSON error: {e}")
                     else:
-                        print("[GPS] No GPS fix yet")
-                        return None
+                        print(f"[GPS] Command failed or no output")
+                
+                except subprocess.TimeoutExpired:
+                    print("[GPS] Timeout after 5s")
+                except FileNotFoundError:
+                    print("[GPS] termux-location not found! Install: pkg install termux-api")
+                except Exception as e:
+                    print(f"[GPS] Error: {e}")
             
             elif system == 'Linux':
                 # LINUX - try gpsd
@@ -528,17 +569,16 @@ class Plugin:
                             'longitude': packet.lon,
                             'altitude': packet.alt if packet.mode == 3 else 0,
                             'speed': packet.hspeed,
-                            'accuracy': packet.error.get('epx', 0)
+                            'accuracy': packet.error.get('epx', 0),
+                            'provider': 'gpsd'
                         }
                 except ImportError:
-                    print("[GPS] gpsd module not installed: pip install gpsd-py3")
+                    print("[GPS] gpsd not installed: pip install gpsd-py3")
                 except Exception as e:
                     print(f"[GPS] gpsd error: {e}")
         
-        except subprocess.TimeoutExpired:
-            print("[GPS] Timeout waiting for GPS fix")
         except Exception as e:
-            print(f"[GPS] Error: {e}")
+            print(f"[GPS] Unexpected error: {e}")
         
         return None
     
@@ -655,6 +695,8 @@ class Plugin:
             
             # Clean contact name for filename
             safe_name = "".join(c for c in contact_name if c.isalnum() or c in (' ', '-', '_')).strip()
+            if not safe_name:
+                safe_name = "unknown"
             
             # Save JSON
             json_file = f"rangetest_{safe_name}_{timestamp}.json"
@@ -839,8 +881,8 @@ class Plugin:
                 print(f"   Interval: {config['interval']}s")
                 print(f"   Elapsed: {elapsed}s")
                 print(f"   GPS received: {gps_count}/{config['current']}")
-                if gps_count > 0:
-                    reception = int((gps_count/config['current'])*100) if config['current'] > 0 else 0
+                if gps_count > 0 and config['current'] > 0:
+                    reception = int((gps_count/config['current'])*100)
                     print(f"   Reception: {reception}%")
             print("─"*70 + "\n")
     
@@ -859,11 +901,16 @@ class Plugin:
             print(f"   Lon: {gps_data.get('longitude', 'N/A'):.6f}")
             if gps_data.get('accuracy'):
                 print(f"   Accuracy: ±{gps_data['accuracy']:.0f}m")
+            if gps_data.get('provider'):
+                print(f"   Provider: {gps_data['provider']}")
         else:
             print("❌ GPS Not Available")
             print("\n   📱 Termux setup:")
             print("      pkg install termux-api")
             print("      Install 'Termux:API' from F-Droid")
-            print("      termux-location  # test GPS")
+            print("      Grant location permission in Android Settings")
+            print("")
+            print("   🧪 Test GPS:")
+            print("      termux-location -r best")
         
         print("─"*70 + "\n")
