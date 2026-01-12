@@ -510,75 +510,63 @@ class Plugin:
             print(f"❌ Failed to send: {e}")
         
         print(f"{'='*60}\n")
-    
+
     def get_gps_location(self):
-        """Get GPS location using -r best (automatic provider selection)"""
+        """Get GPS location trying multiple providers in order"""
         system = platform.system()
         is_termux = os.path.exists('/data/data/com.termux')
         
         try:
             if is_termux:
-                print("[GPS] Getting location with termux-location -r best...")
+                # Try providers in order: network (fast), gps (accurate), passive (cached)
+                providers = [
+                    ('network', 5, 'Network (WiFi/Cell)'),
+                    ('gps', 8, 'GPS Satellite'),
+                    ('passive', 2, 'Cached Location')
+                ]
                 
-                try:
-                    # Use termux-location with -r best
-                    result = subprocess.run(
-                        ['termux-location', '-r', 'best'],
-                        capture_output=True,
-                        text=True,
-                        timeout=8,
-                        env=os.environ.copy()
-                    )
+                for provider, timeout, description in providers:
+                    print(f"[GPS] Trying {description}...")
                     
-                    print(f"[GPS] Command returned code: {result.returncode}")
-                    
-                    if result.stderr:
-                        print(f"[GPS] Stderr: {result.stderr.strip()}")
-                    
-                    if result.stdout:
-                        stdout_clean = result.stdout.strip()
-                        print(f"[GPS] Got {len(stdout_clean)} chars of output")
+                    try:
+                        result = subprocess.run(
+                            ['termux-location', '-p', provider],
+                            capture_output=True,
+                            text=True,
+                            timeout=timeout,
+                            env=os.environ.copy()
+                        )
                         
-                        try:
-                            data = json.loads(stdout_clean)
+                        if result.returncode == 0 and result.stdout:
+                            stdout_clean = result.stdout.strip()
                             
-                            # Validate coordinates
-                            if 'latitude' in data and 'longitude' in data:
-                                lat = data.get('latitude')
-                                lon = data.get('longitude')
+                            try:
+                                data = json.loads(stdout_clean)
                                 
-                                if lat is not None and lon is not None:
-                                    if abs(lat) > 0.001 or abs(lon) > 0.001:
-                                        provider = data.get('provider', 'unknown')
-                                        accuracy = data.get('accuracy', 0)
-                                        print(f"[GPS] ✅ Success: {lat:.6f}, {lon:.6f} via {provider}")
-                                        return data
-                                    else:
-                                        print(f"[GPS] Invalid coords: ({lat}, {lon})")
-                                else:
-                                    print(f"[GPS] Null coordinates")
-                            else:
-                                print(f"[GPS] Missing lat/lon keys: {list(data.keys())}")
-                        
-                        except json.JSONDecodeError as e:
-                            print(f"[GPS] JSON error: {e}")
-                            print(f"[GPS] Raw: {stdout_clean[:100]}")
-                    else:
-                        print(f"[GPS] No stdout")
+                                # Validate coordinates
+                                if 'latitude' in data and 'longitude' in data:
+                                    lat = data.get('latitude')
+                                    lon = data.get('longitude')
+                                    
+                                    if lat is not None and lon is not None:
+                                        if abs(lat) > 0.001 or abs(lon) > 0.001:
+                                            accuracy = data.get('accuracy', 0)
+                                            print(f"[GPS] ✅ Success via {provider}: {lat:.6f}, {lon:.6f} (±{accuracy:.0f}m)")
+                                            return data
+                            
+                            except json.JSONDecodeError:
+                                continue
                     
-                    return None
-                    
-                except subprocess.TimeoutExpired:
-                    print("[GPS] Timeout after 8s")
-                    return None
-                except FileNotFoundError:
-                    print("[GPS] termux-location not found!")
-                    return None
-                except Exception as e:
-                    print(f"[GPS] Exception: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    return None
+                    except subprocess.TimeoutExpired:
+                        print(f"[GPS] {provider} timeout")
+                        continue
+                    except Exception as e:
+                        print(f"[GPS] {provider} error: {e}")
+                        continue
+                
+                # All providers failed
+                print("[GPS] All providers failed")
+                return None
             
             elif system == 'Linux':
                 # LINUX - try gpsd
@@ -603,10 +591,8 @@ class Plugin:
         
         except Exception as e:
             print(f"[GPS] Unexpected error: {e}")
-            import traceback
-            traceback.print_exc()
         
-        return None
+        return None    
     
     def notify_range_ping(self, current, total):
         """Notify user of received ping (MOBILE CLIENT)"""
