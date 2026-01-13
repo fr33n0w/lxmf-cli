@@ -13,7 +13,7 @@ class Plugin:
     def __init__(self, client):
         self.client = client
         self.commands = ['rangetest', 'rangestop', 'rangestatus', 'rangegetlogs']
-        self.description = "Range testing - incremental GPS logging with HTML map"
+        self.description = "Range testing - incremental GPS logging with HTML map, KML, and JSON"
         
         # PHONE MODE - receives pings, logs GPS
         self.active_tests = {}  # Tests where WE receive pings
@@ -22,6 +22,47 @@ class Plugin:
         self.server_tests = {}
         self.server_threads = {}
         
+    def extract_link_stats(self, message):
+        """Extract RSSI, SNR, and link quality from LXMF message"""
+        rssi = None
+        snr = None
+        q = None
+        
+        try:
+            # Try to get packet from message
+            if hasattr(message, 'packet') and message.packet:
+                packet = message.packet
+                
+                # RSSI (Received Signal Strength Indicator)
+                if hasattr(packet, 'rssi'):
+                    rssi = packet.rssi
+                
+                # SNR (Signal-to-Noise Ratio)
+                if hasattr(packet, 'snr'):
+                    snr = packet.snr
+                
+                # Link quality
+                if hasattr(packet, 'q'):
+                    q = packet.q
+            
+            # Alternative: Try to get from transport receipt
+            if hasattr(message, 'receipt') and message.receipt:
+                receipt = message.receipt
+                
+                if rssi is None and hasattr(receipt, 'rssi'):
+                    rssi = receipt.rssi
+                
+                if snr is None and hasattr(receipt, 'snr'):
+                    snr = receipt.snr
+                
+                if q is None and hasattr(receipt, 'q'):
+                    q = receipt.q
+        
+        except Exception as e:
+            pass
+        
+        return rssi, snr, q
+    
     def on_message(self, message, msg_data):
         """Handle incoming messages"""
         content = msg_data['content'].strip()
@@ -95,6 +136,9 @@ class Plugin:
                         timestamp = datetime.now().strftime('%H:%M:%S')
                         gps_data = self.get_gps_location()
                         
+                        # Extract RSSI and SNR from message
+                        rssi, snr, q = self.extract_link_stats(message)
+                        
                         if gps_data:
                             lat = gps_data['latitude']
                             lon = gps_data['longitude']
@@ -111,16 +155,27 @@ class Plugin:
                                 'speed': speed,
                                 'altitude': alt,
                                 'accuracy': acc,
-                                'provider': provider
+                                'provider': provider,
+                                'rssi': rssi,
+                                'snr': snr,
+                                'q': q
                             }
                             
-                            # WRITE TO FILES IMMEDIATELY
+                            # WRITE TO ALL FILES IMMEDIATELY
                             test = self.active_tests[source_hash]
                             self.append_to_json(test['json_path'], gps_point)
+                            self.append_to_kml(test['kml_path'], gps_point, current == 1, current == total)
                             self.append_to_html(test['html_path'], gps_point, current == 1, current == total)
                             
                             print(f"[GPS] ✅ Logged: {lat:.6f}, {lon:.6f} (±{acc:.0f}m)")
-                            print(f"[GPS] 💾 Written to files")
+                            if rssi is not None:
+                                print(f"[RSSI] {rssi:.1f} dBm", end="")
+                                if snr is not None:
+                                    print(f" | SNR: {snr:.1f} dB", end="")
+                                if q is not None:
+                                    print(f" | Q: {q:.1f}%", end="")
+                                print()
+                            print(f"[GPS] 💾 Written to JSON, KML, HTML")
                         else:
                             print(f"[GPS] ⚠️ GPS unavailable")
                         
@@ -259,9 +314,11 @@ class Plugin:
         
         json_file = f"rangetest_{safe_name}_{timestamp}.json"
         html_file = f"rangetest_{safe_name}_{timestamp}.html"
+        kml_file = f"rangetest_{safe_name}_{timestamp}.kml"
         
         json_path = os.path.join(log_dir, json_file)
         html_path = os.path.join(log_dir, html_file)
+        kml_path = os.path.join(log_dir, kml_file)
         
         # Initialize JSON
         with open(json_path, 'w') as f:
@@ -274,6 +331,9 @@ class Plugin:
                 'gps_points': []
             }, f, indent=2)
         
+        # Initialize KML
+        self.init_kml_file(kml_path, server_name)
+        
         # Initialize HTML map
         self.init_html_file(html_path, server_name)
         
@@ -284,6 +344,7 @@ class Plugin:
             'start_time': time.time(),
             'json_path': json_path,
             'html_path': html_path,
+            'kml_path': kml_path,
             'server_name': server_name
         }
         
@@ -295,11 +356,165 @@ class Plugin:
         print(f"📍 GPS: Incremental logging")
         print(f"💾 Files:")
         print(f"   {json_file}")
+        print(f"   {kml_file}")
         print(f"   {html_file}")
         print(f"{'─'*70}\n")
     
+    def init_kml_file(self, filepath, server_name):
+        """Initialize KML file with header"""
+        kml_header = f'''<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+  <Document>
+    <name>Range Test - {server_name}</name>
+    <description>LXMF Range Test - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</description>
+    
+    <Style id="startPoint">
+      <IconStyle>
+        <color>ff00ff00</color>
+        <scale>1.2</scale>
+        <Icon>
+          <href>http://maps.google.com/mapfiles/kml/paddle/grn-circle.png</href>
+        </Icon>
+      </IconStyle>
+    </Style>
+    
+    <Style id="normalPoint">
+      <IconStyle>
+        <color>ff0078d4</color>
+        <scale>0.8</scale>
+        <Icon>
+          <href>http://maps.google.com/mapfiles/kml/paddle/blu-circle.png</href>
+        </Icon>
+      </IconStyle>
+    </Style>
+    
+    <Style id="endPoint">
+      <IconStyle>
+        <color>ff0000ff</color>
+        <scale>1.2</scale>
+        <Icon>
+          <href>http://maps.google.com/mapfiles/kml/paddle/red-circle.png</href>
+        </Icon>
+      </IconStyle>
+    </Style>
+    
+    <Style id="pathStyle">
+      <LineStyle>
+        <color>ffff0000</color>
+        <width>4</width>
+      </LineStyle>
+    </Style>
+    
+    <Folder>
+      <name>GPS Points</name>
+<!-- POINTS_START -->
+'''
+        
+        with open(filepath, 'w') as f:
+            f.write(kml_header)
+    
+    def append_to_kml(self, kml_path, gps_point, is_first, is_last):
+        """Append GPS point to KML file"""
+        try:
+            # Determine style
+            if is_first:
+                style = "startPoint"
+                name = f"START - Ping #{gps_point['index']}"
+            elif is_last:
+                style = "endPoint"
+                name = f"END - Ping #{gps_point['index']}"
+            else:
+                style = "normalPoint"
+                name = f"Ping #{gps_point['index']}"
+            
+            # Create placemark
+            placemark = f'''      <Placemark>
+        <name>{name}</name>
+        <description><![CDATA[
+          <b>Ping #{gps_point['index']}</b><br/>
+          Time: {gps_point['time']}<br/>
+          Speed: {gps_point['speed']:.1f} km/h<br/>
+          Altitude: {gps_point['altitude']:.1f} m<br/>
+          Accuracy: ±{gps_point['accuracy']:.0f} m<br/>
+          Provider: {gps_point['provider']}<br/>
+          Lat: {gps_point['lat']:.6f}<br/>
+          Lon: {gps_point['lon']:.6f}
+        ]]></description>
+        <styleUrl>#{style}</styleUrl>
+        <Point>
+          <coordinates>{gps_point['lon']:.6f},{gps_point['lat']:.6f},{gps_point['altitude']:.1f}</coordinates>
+        </Point>
+      </Placemark>
+'''
+            
+            # Read file
+            with open(kml_path, 'r') as f:
+                content = f.read()
+            
+            # Insert placemark before POINTS_START marker
+            if '<!-- POINTS_START -->' in content:
+                content = content.replace('<!-- POINTS_START -->', placemark + '<!-- POINTS_START -->')
+            
+            # Write back
+            with open(kml_path, 'w') as f:
+                f.write(content)
+            
+            # If last point, finalize KML
+            if is_last:
+                self.finalize_kml(kml_path)
+        
+        except Exception as e:
+            print(f"[KML] ⚠️ Error: {e}")
+    
+    def finalize_kml(self, kml_path):
+        """Finalize KML file with path and closing tags"""
+        try:
+            # Read current file
+            with open(kml_path, 'r') as f:
+                content = f.read()
+            
+            # Extract all coordinates from placemarks
+            coords = []
+            import re
+            coord_matches = re.findall(r'<coordinates>([-\d.]+),([-\d.]+),([-\d.]+)</coordinates>', content)
+            
+            if coord_matches:
+                # Build path coordinates
+                coord_str = '\n            '.join([f"{lon},{lat},{alt}" for lon, lat, alt in coord_matches])
+                
+                # Create path placemark
+                path_placemark = f'''      <Placemark>
+        <name>Path</name>
+        <description>Complete route</description>
+        <styleUrl>#pathStyle</styleUrl>
+        <LineString>
+          <tessellate>1</tessellate>
+          <coordinates>
+            {coord_str}
+          </coordinates>
+        </LineString>
+      </Placemark>
+'''
+                
+                # Add path before closing folder
+                content = content.replace('<!-- POINTS_START -->', path_placemark + '<!-- POINTS_START -->')
+            
+            # Add closing tags
+            closing = '''    </Folder>
+  </Document>
+</kml>'''
+            
+            content += closing
+            
+            # Write final file
+            with open(kml_path, 'w') as f:
+                f.write(content)
+        
+        except Exception as e:
+            print(f"[KML] ⚠️ Finalize error: {e}")
+    
     def init_html_file(self, filepath, server_name):
-        """Initialize self-contained HTML map file"""
+        """Initialize self-contained HTML map file with enhanced styling"""
         html = f'''<!DOCTYPE html>
 <html>
 <head>
@@ -315,14 +530,14 @@ class Plugin:
         #map {{
             position: absolute;
             top: 0;
-            bottom: 100px;
+            bottom: 140px;
             width: 100%;
         }}
         #info {{
             position: absolute;
             bottom: 0;
             width: 100%;
-            height: 100px;
+            height: 140px;
             background: rgba(255, 255, 255, 0.95);
             padding: 15px;
             box-sizing: border-box;
@@ -349,9 +564,16 @@ class Plugin:
             margin: 5px 0;
             font-size: 12px;
         }}
+        .signal-bar {{
+            display: inline-block;
+            width: 60px;
+            height: 8px;
+            border-radius: 4px;
+            margin-left: 5px;
+        }}
         @media (max-width: 600px) {{
             #info {{
-                height: 120px;
+                height: 160px;
             }}
             .stat {{
                 display: block;
@@ -374,6 +596,8 @@ class Plugin:
         <div class="stat"><span class="stat-label">Points:</span> <span id="points">0</span></div>
         <div class="stat"><span class="stat-label">Distance:</span> <span id="distance">0 km</span></div>
         <div class="stat"><span class="stat-label">Max Speed:</span> <span id="maxspeed">0 km/h</span></div>
+        <div class="stat"><span class="stat-label">Avg RSSI:</span> <span id="avgrssi">N/A</span></div>
+        <div class="stat"><span class="stat-label">Avg SNR:</span> <span id="avgsnr">N/A</span></div>
         <div class="stat"><span class="stat-label">Last Update:</span> <span id="lastupdate">-</span></div>
     </div>
 
@@ -397,38 +621,71 @@ class Plugin:
         var markers = [];
         var gpsPoints = [];
         var maxSpeed = 0;
+        var rssiValues = [];
+        var snrValues = [];
         
-        // Marker icons
-        var startIcon = L.divIcon({{
-            className: 'custom-marker',
-            html: '<div style="background-color: #00ff00; width: 14px; height: 14px; border-radius: 50%; border: 3px solid white; box-shadow: 0 0 4px rgba(0,0,0,0.5);"></div>',
-            iconSize: [14, 14],
-            iconAnchor: [7, 7]
-        }});
+        // Function to get signal quality color based on RSSI
+        function getSignalColor(rssi) {{
+            if (rssi === null || rssi === undefined) return '#999999';
+            if (rssi >= -60) return '#00ff00';  // Excellent (green)
+            if (rssi >= -70) return '#7fff00';  // Very Good (lime)
+            if (rssi >= -80) return '#ffff00';  // Good (yellow)
+            if (rssi >= -90) return '#ffa500';  // Fair (orange)
+            if (rssi >= -100) return '#ff6600'; // Poor (dark orange)
+            return '#ff0000';                    // Very Poor (red)
+        }}
         
-        var pointIcon = L.divIcon({{
-            className: 'custom-marker',
-            html: '<div style="background-color: #0078d4; width: 10px; height: 10px; border-radius: 50%; border: 2px solid white; box-shadow: 0 0 3px rgba(0,0,0,0.5);"></div>',
-            iconSize: [10, 10],
-            iconAnchor: [5, 5]
-        }});
+        // Function to get marker size based on signal quality
+        function getMarkerSize(rssi) {{
+            if (rssi === null || rssi === undefined) return 10;
+            if (rssi >= -60) return 14;
+            if (rssi >= -70) return 12;
+            if (rssi >= -80) return 10;
+            return 8;
+        }}
         
-        var endIcon = L.divIcon({{
-            className: 'custom-marker',
-            html: '<div style="background-color: #ff0000; width: 14px; height: 14px; border-radius: 50%; border: 3px solid white; box-shadow: 0 0 4px rgba(0,0,0,0.5);"></div>',
-            iconSize: [14, 14],
-            iconAnchor: [7, 7]
-        }});
+        // Create custom marker with signal color
+        function createSignalIcon(rssi, isStart, isEnd) {{
+            if (isStart) {{
+                return L.divIcon({{
+                    className: 'custom-marker',
+                    html: '<div style="background-color: #00ff00; width: 16px; height: 16px; border-radius: 50%; border: 3px solid white; box-shadow: 0 0 6px rgba(0,0,0,0.6);"></div>',
+                    iconSize: [16, 16],
+                    iconAnchor: [8, 8]
+                }});
+            }}
+            if (isEnd) {{
+                return L.divIcon({{
+                    className: 'custom-marker',
+                    html: '<div style="background-color: #ff0000; width: 16px; height: 16px; border-radius: 50%; border: 3px solid white; box-shadow: 0 0 6px rgba(0,0,0,0.6);"></div>',
+                    iconSize: [16, 16],
+                    iconAnchor: [8, 8]
+                }});
+            }}
+            
+            var color = getSignalColor(rssi);
+            var size = getMarkerSize(rssi);
+            return L.divIcon({{
+                className: 'custom-marker',
+                html: '<div style="background-color: ' + color + '; width: ' + size + 'px; height: ' + size + 'px; border-radius: 50%; border: 2px solid white; box-shadow: 0 0 4px rgba(0,0,0,0.5);"></div>',
+                iconSize: [size, size],
+                iconAnchor: [size/2, size/2]
+            }});
+        }}
         
-        // Legend
+        // Enhanced legend with signal quality
         var legend = L.control({{position: 'topright'}});
         legend.onAdd = function(map) {{
             var div = L.DomUtil.create('div', 'legend');
             div.innerHTML = '<div style="font-weight: bold; margin-bottom: 5px;">Range Test</div>' +
                           '<div class="legend-item">🟢 Start Point</div>' +
-                          '<div class="legend-item">🔵 GPS Points</div>' +
                           '<div class="legend-item">🔴 End Point</div>' +
-                          '<div class="legend-item">━━ Path</div>';
+                          '<div class="legend-item">━━ Path</div>' +
+                          '<div style="margin-top: 10px; font-weight: bold; font-size: 11px;">Signal Quality (RSSI):</div>' +
+                          '<div class="legend-item" style="font-size: 11px;">🟢 Excellent (≥-60 dBm)</div>' +
+                          '<div class="legend-item" style="font-size: 11px;">🟡 Good (-70 to -80 dBm)</div>' +
+                          '<div class="legend-item" style="font-size: 11px;">🟠 Fair (-80 to -90 dBm)</div>' +
+                          '<div class="legend-item" style="font-size: 11px;">🔴 Poor (≤-90 dBm)</div>';
             return div;
         }};
         legend.addTo(map);
@@ -445,12 +702,32 @@ class Plugin:
             return R * c;
         }}
         
-        // Add point function
-        function addPoint(lat, lon, index, time, speed, accuracy) {{
+        // Function to get signal bar HTML
+        function getSignalBar(value, min, max, label) {{
+            if (value === null || value === undefined) return '';
+            var percent = Math.max(0, Math.min(100, ((value - min) / (max - min)) * 100));
+            var color = getSignalColor(value);
+            return '<div style="margin: 5px 0;">' +
+                   '<span style="font-size: 11px;">' + label + ': ' + value.toFixed(1) + '</span>' +
+                   '<div style="background: #ddd; width: 100px; height: 6px; display: inline-block; margin-left: 5px; border-radius: 3px; vertical-align: middle;">' +
+                   '<div style="background: ' + color + '; width: ' + percent + '%; height: 100%; border-radius: 3px;"></div>' +
+                   '</div></div>';
+        }}
+        
+        // Add point function with enhanced signal data
+        function addPoint(lat, lon, index, time, speed, accuracy, rssi, snr, q) {{
             var point = [lat, lon];
             gpsPoints.push(point);
             
-            // Update polyline
+            // Track signal stats
+            if (rssi !== null && rssi !== undefined) {{
+                rssiValues.push(rssi);
+            }}
+            if (snr !== null && snr !== undefined) {{
+                snrValues.push(snr);
+            }}
+            
+            // Update polyline with gradient based on signal quality
             polyline.setLatLngs(gpsPoints);
             
             // Track max speed
@@ -458,17 +735,32 @@ class Plugin:
                 maxSpeed = speed;
             }}
             
-            // Add marker
-            var icon = (index === 1) ? startIcon : pointIcon;
+            // Create marker with signal-based coloring
+            var isStart = (index === 1);
+            var isEnd = false; // Will be set later
+            var icon = createSignalIcon(rssi, isStart, isEnd);
             var marker = L.marker(point, {{icon: icon}}).addTo(map);
-            marker.bindPopup(
-                '<b>Ping #' + index + '</b><br>' +
+            
+            // Enhanced popup with signal data
+            var popupContent = '<div style="min-width: 200px;"><b>Ping #' + index + '</b><br>' +
                 'Time: ' + time + '<br>' +
                 'Speed: ' + speed.toFixed(1) + ' km/h<br>' +
-                'Accuracy: ±' + accuracy.toFixed(0) + 'm<br>' +
-                'Lat: ' + lat.toFixed(6) + '<br>' +
-                'Lon: ' + lon.toFixed(6)
-            );
+                'Accuracy: ±' + accuracy.toFixed(0) + 'm<br>';
+            
+            if (rssi !== null && rssi !== undefined) {{
+                popupContent += getSignalBar(rssi, -110, -50, 'RSSI') + '<br>';
+            }}
+            if (snr !== null && snr !== undefined) {{
+                popupContent += getSignalBar(snr, -10, 20, 'SNR') + '<br>';
+            }}
+            if (q !== null && q !== undefined) {{
+                popupContent += 'Link Quality: ' + q.toFixed(1) + '%<br>';
+            }}
+            
+            popupContent += 'Lat: ' + lat.toFixed(6) + '<br>' +
+                'Lon: ' + lon.toFixed(6) + '</div>';
+            
+            marker.bindPopup(popupContent);
             markers.push(marker);
             
             // Calculate total distance
@@ -480,10 +772,18 @@ class Plugin:
                 );
             }}
             
+            // Calculate average RSSI and SNR
+            var avgRssi = rssiValues.length > 0 ? 
+                rssiValues.reduce((a, b) => a + b, 0) / rssiValues.length : null;
+            var avgSnr = snrValues.length > 0 ? 
+                snrValues.reduce((a, b) => a + b, 0) / snrValues.length : null;
+            
             // Update stats
             document.getElementById('points').textContent = gpsPoints.length;
             document.getElementById('distance').textContent = totalDist.toFixed(2) + ' km';
             document.getElementById('maxspeed').textContent = maxSpeed.toFixed(1) + ' km/h';
+            document.getElementById('avgrssi').textContent = avgRssi !== null ? avgRssi.toFixed(1) + ' dBm' : 'N/A';
+            document.getElementById('avgsnr').textContent = avgSnr !== null ? avgSnr.toFixed(1) + ' dB' : 'N/A';
             document.getElementById('lastupdate').textContent = time;
             
             // Fit map to show all points with padding
@@ -498,7 +798,7 @@ class Plugin:
                 // Remove last marker and replace with end icon
                 map.removeLayer(markers[markers.length - 1]);
                 var lastPoint = gpsPoints[gpsPoints.length - 1];
-                var endMarker = L.marker(lastPoint, {{icon: endIcon}}).addTo(map);
+                var endMarker = L.marker(lastPoint, {{icon: createSignalIcon(null, false, true)}}).addTo(map);
                 endMarker.bindPopup('<b>END</b><br>Final Position<br>Total Points: ' + gpsPoints.length);
                 markers[markers.length - 1] = endMarker;
             }}
@@ -531,8 +831,17 @@ class Plugin:
     def append_to_html(self, html_path, gps_point, is_first, is_last):
         """Append GPS point to HTML file"""
         try:
-            # Create JavaScript line to add point
-            js_line = f"        addPoint({gps_point['lat']}, {gps_point['lon']}, {gps_point['index']}, '{gps_point['time']}', {gps_point['speed']:.1f}, {gps_point['accuracy']:.0f});\n"
+            # Create JavaScript line to add point with signal data
+            rssi = gps_point.get('rssi')
+            snr = gps_point.get('snr')
+            q = gps_point.get('q')
+            
+            # Format None values as null for JavaScript
+            rssi_str = str(rssi) if rssi is not None else 'null'
+            snr_str = str(snr) if snr is not None else 'null'
+            q_str = str(q) if q is not None else 'null'
+            
+            js_line = f"        addPoint({gps_point['lat']}, {gps_point['lon']}, {gps_point['index']}, '{gps_point['time']}', {gps_point['speed']:.1f}, {gps_point['accuracy']:.0f}, {rssi_str}, {snr_str}, {q_str});\n"
             
             # Read file
             with open(html_path, 'r') as f:
@@ -590,13 +899,48 @@ class Plugin:
         print(f"⏱️ Duration: {int(elapsed/60)}m {int(elapsed%60)}s")
         print(f"💾 Files:")
         print(f"   {os.path.basename(test['json_path'])}")
+        print(f"   {os.path.basename(test['kml_path'])}")
         print(f"   {os.path.basename(test['html_path'])}")
-        print(f"{'─'*70}")
-        print(f"\n💡 Copy HTML to shared storage:")
-        print(f"   cp {test['html_path']} /sdcard/Download/")
-        print(f"\n💡 Open in browser:")
+        
+        # Auto-copy to /sdcard/Download/ if on Termux
+        is_termux = os.path.exists('/data/data/com.termux')
+        if is_termux:
+            download_dir = '/sdcard/Download'
+            if os.path.exists(download_dir):
+                try:
+                    import shutil
+                    
+                    # Copy all three files
+                    for src_path in [test['json_path'], test['kml_path'], test['html_path']]:
+                        filename = os.path.basename(src_path)
+                        dest_path = os.path.join(download_dir, filename)
+                        shutil.copy2(src_path, dest_path)
+                    
+                    print(f"{'─'*70}")
+                    print(f"✅ Auto-copied to /sdcard/Download/")
+                    print(f"{'─'*70}")
+                    print(f"\n📱 Access files in:")
+                    print(f"   • File Manager → Download folder")
+                    print(f"   • Share from Download folder to apps")
+                except Exception as e:
+                    print(f"{'─'*70}")
+                    print(f"⚠️ Auto-copy failed: {e}")
+                    print(f"\n💡 Manual copy:")
+                    print(f"   cp {test['json_path']} /sdcard/Download/")
+                    print(f"   cp {test['kml_path']} /sdcard/Download/")
+                    print(f"   cp {test['html_path']} /sdcard/Download/")
+            else:
+                print(f"{'─'*70}")
+                print(f"⚠️ /sdcard/Download/ not found")
+                print(f"\n💡 Copy manually if needed")
+        else:
+            print(f"{'─'*70}")
+        
+        print(f"\n💡 Open HTML map:")
         print(f"   termux-open {test['html_path']}")
-        print(f"\n🗺️ Interactive map ready!\n")
+        print(f"\n💡 Import KML to maps:")
+        print(f"   Open in Google Earth, OsmAnd, or other mapping app")
+        print(f"\n🗺️ All formats ready!\n")
         
         del self.active_tests[server_hash]
     
@@ -606,11 +950,32 @@ class Plugin:
             return
         
         test = self.active_tests[server_hash]
+        
+        # Finalize all files
         self.finalize_html(test['html_path'])
+        self.finalize_kml(test['kml_path'])
         
         print(f"\n⚠️ Test stopped early")
         print(f"📊 Received: {test['received']}/{test['count']}")
-        print(f"💾 Files saved\n")
+        print(f"💾 All files saved (JSON, KML, HTML)")
+        
+        # Auto-copy to /sdcard/Download/ if on Termux
+        is_termux = os.path.exists('/data/data/com.termux')
+        if is_termux:
+            download_dir = '/sdcard/Download'
+            if os.path.exists(download_dir):
+                try:
+                    import shutil
+                    
+                    # Copy all three files
+                    for src_path in [test['json_path'], test['kml_path'], test['html_path']]:
+                        filename = os.path.basename(src_path)
+                        dest_path = os.path.join(download_dir, filename)
+                        shutil.copy2(src_path, dest_path)
+                    
+                    print(f"\n✅ Auto-copied to /sdcard/Download/\n")
+                except Exception as e:
+                    print(f"\n⚠️ Auto-copy failed: {e}\n")
         
         del self.active_tests[server_hash]
     
@@ -670,7 +1035,7 @@ class Plugin:
         try:
             if is_termux:
                 os.system('termux-vibrate -d 100 2>/dev/null &')
-                os.system(f'termux-notification --title "📡 Ping {current}/{total}" --content "GPS saved to map!" 2>/dev/null &')
+                os.system(f'termux-notification --title "📡 Ping {current}/{total}" --content "GPS + Signal data saved!" 2>/dev/null &')
         except:
             pass
     
@@ -691,6 +1056,7 @@ class Plugin:
                     contact = self.client.format_contact_display_short(h)
                     print(f"  {contact}: {c['received']}/{c['count']} received")
                     print(f"     JSON: {os.path.basename(c['json_path'])}")
+                    print(f"     KML:  {os.path.basename(c['kml_path'])}")
                     print(f"     HTML: {os.path.basename(c['html_path'])}")
                 print("─"*70 + "\n")
             else:
@@ -719,7 +1085,7 @@ class Plugin:
         elif cmd == 'rangegetlogs':
             log_dir = os.path.join(self.client.storage_path, "rangetest_logs")
             if os.path.exists(log_dir):
-                files = sorted([f for f in os.listdir(log_dir) if f.endswith(('.html', '.json'))], reverse=True)
+                files = sorted([f for f in os.listdir(log_dir) if f.endswith(('.html', '.json', '.kml'))], reverse=True)
                 if files:
                     print("\n📁 Range Test Logs:")
                     print("─"*70)
@@ -730,11 +1096,15 @@ class Plugin:
                     print("─"*70)
                     print(f"\nLog directory: {log_dir}")
                     print(f"\n💡 Copy to shared storage:")
-                    print(f"   cp {log_dir}/*.html /sdcard/Download/")
+                    print(f"   cp {log_dir}/*.{{html,json,kml}} /sdcard/Download/")
                     print(f"\n💡 Open latest map:")
                     latest_html = next((f for f in files if f.endswith('.html')), None)
                     if latest_html:
                         print(f"   termux-open {log_dir}/{latest_html}")
+                    print(f"\n💡 Import KML to mapping apps:")
+                    latest_kml = next((f for f in files if f.endswith('.kml')), None)
+                    if latest_kml:
+                        print(f"   Open {latest_kml} in Google Earth, OsmAnd, etc.")
                     print(f"\n💡 Share file:")
                     if latest_html:
                         print(f"   termux-share {log_dir}/{latest_html}\n")
