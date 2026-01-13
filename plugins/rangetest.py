@@ -400,22 +400,56 @@ class Plugin:
         html_path = os.path.join(log_dir, html_file)
         kml_path = os.path.join(log_dir, kml_file)
         
-        # Initialize JSON
-        with open(json_path, 'w') as f:
-            json.dump({
-                'server': server_name,
-                'timestamp': timestamp,
-                'test_start': datetime.now().isoformat(),
-                'expected_pings': count,
-                'interval': interval,
-                'gps_points': []
-            }, f, indent=2)
+        # Initialize JSON with proper permissions
+        try:
+            with open(json_path, 'w') as f:
+                json.dump({
+                    'server': server_name,
+                    'timestamp': timestamp,
+                    'test_start': datetime.now().isoformat(),
+                    'expected_pings': count,
+                    'interval': interval,
+                    'gps_points': []
+                }, f, indent=2)
+            
+            # Set file permissions to be fully writable
+            if is_termux:
+                os.chmod(json_path, 0o666)
+        except Exception as e:
+            print(f"[Range Test] ⚠️ Error creating JSON: {e}")
+            # Fall back to app storage
+            log_dir = os.path.join(self.client.storage_path, "rangetest_logs")
+            os.makedirs(log_dir, exist_ok=True)
+            json_path = os.path.join(log_dir, json_file)
+            with open(json_path, 'w') as f:
+                json.dump({
+                    'server': server_name,
+                    'timestamp': timestamp,
+                    'test_start': datetime.now().isoformat(),
+                    'expected_pings': count,
+                    'interval': interval,
+                    'gps_points': []
+                }, f, indent=2)
         
         # Initialize KML
-        self.init_kml_file(kml_path, server_name)
+        try:
+            self.init_kml_file(kml_path, server_name)
+            if is_termux:
+                os.chmod(kml_path, 0o666)
+        except Exception as e:
+            print(f"[Range Test] ⚠️ Error creating KML: {e}")
+            kml_path = os.path.join(log_dir, kml_file)
+            self.init_kml_file(kml_path, server_name)
         
         # Initialize HTML map
-        self.init_html_file(html_path, server_name)
+        try:
+            self.init_html_file(html_path, server_name)
+            if is_termux:
+                os.chmod(html_path, 0o666)
+        except Exception as e:
+            print(f"[Range Test] ⚠️ Error creating HTML: {e}")
+            html_path = os.path.join(log_dir, html_file)
+            self.init_html_file(html_path, server_name)
         
         self.active_tests[server_hash] = {
             'count': count,
@@ -426,7 +460,8 @@ class Plugin:
             'html_path': html_path,
             'kml_path': kml_path,
             'server_name': server_name,
-            'log_dir': log_dir
+            'log_dir': log_dir,
+            'is_termux': is_termux
         }
         
         print(f"\n{'─'*70}")
@@ -509,18 +544,36 @@ class Plugin:
                 style = "normalPoint"
                 name = f"Ping #{gps_point['index']}"
             
+            # Build description with signal data
+            desc_parts = [
+                f"<b>Ping #{gps_point['index']}</b><br/>",
+                f"Time: {gps_point['time']}<br/>",
+                f"Speed: {gps_point['speed']:.1f} km/h<br/>",
+                f"Altitude: {gps_point['altitude']:.1f} m<br/>",
+                f"Accuracy: ±{gps_point['accuracy']:.0f} m<br/>"
+            ]
+            
+            # Add signal data if available
+            if gps_point.get('rssi') is not None:
+                desc_parts.append(f"RSSI: {gps_point['rssi']:.1f} dBm<br/>")
+            if gps_point.get('snr') is not None:
+                desc_parts.append(f"SNR: {gps_point['snr']:.1f} dB<br/>")
+            if gps_point.get('q') is not None:
+                desc_parts.append(f"Link Quality: {gps_point['q']:.1f}%<br/>")
+            
+            desc_parts.extend([
+                f"Provider: {gps_point['provider']}<br/>",
+                f"Lat: {gps_point['lat']:.6f}<br/>",
+                f"Lon: {gps_point['lon']:.6f}"
+            ])
+            
+            description = ''.join(desc_parts)
+            
             # Create placemark
             placemark = f'''      <Placemark>
-        <name>{name}</name>
+        <n>{name}</n>
         <description><![CDATA[
-          <b>Ping #{gps_point['index']}</b><br/>
-          Time: {gps_point['time']}<br/>
-          Speed: {gps_point['speed']:.1f} km/h<br/>
-          Altitude: {gps_point['altitude']:.1f} m<br/>
-          Accuracy: ±{gps_point['accuracy']:.0f} m<br/>
-          Provider: {gps_point['provider']}<br/>
-          Lat: {gps_point['lat']:.6f}<br/>
-          Lon: {gps_point['lon']:.6f}
+          {description}
         ]]></description>
         <styleUrl>#{style}</styleUrl>
         <Point>
@@ -541,12 +594,35 @@ class Plugin:
             with open(kml_path, 'w') as f:
                 f.write(content)
             
+            # Ensure file remains writable
+            try:
+                os.chmod(kml_path, 0o666)
+            except:
+                pass
+            
             # If last point, finalize KML
             if is_last:
                 self.finalize_kml(kml_path)
         
+        except PermissionError as e:
+            print(f"[KML] ⚠️ Permission denied - trying alternative")
+            temp_path = kml_path + '.tmp'
+            try:
+                with open(kml_path, 'r') as f:
+                    content = f.read()
+                if '<!-- POINTS_START -->' in content:
+                    content = content.replace('<!-- POINTS_START -->', placemark + '<!-- POINTS_START -->')
+                with open(temp_path, 'w') as f:
+                    f.write(content)
+                os.replace(temp_path, kml_path)
+                if is_last:
+                    self.finalize_kml(kml_path)
+            except Exception as e2:
+                print(f"[KML] ❌ All methods failed: {e2}")
+        
         except Exception as e:
             print(f"[KML] ⚠️ Error: {e}")
+
     
     def finalize_kml(self, kml_path):
         """Finalize KML file with path and closing tags"""
@@ -903,9 +979,29 @@ class Plugin:
             # Append new point
             data['gps_points'].append(gps_point)
             
-            # Write back
+            # Write back with explicit mode
             with open(json_path, 'w') as f:
                 json.dump(data, f, indent=2)
+            
+            # Ensure file remains writable on Android
+            try:
+                os.chmod(json_path, 0o666)
+            except:
+                pass
+        
+        except PermissionError as e:
+            print(f"[JSON] ⚠️ Permission denied - trying alternative method")
+            # Try alternative: append to a temporary file and rename
+            temp_path = json_path + '.tmp'
+            try:
+                with open(json_path, 'r') as f:
+                    data = json.load(f)
+                data['gps_points'].append(gps_point)
+                with open(temp_path, 'w') as f:
+                    json.dump(data, f, indent=2)
+                os.replace(temp_path, json_path)
+            except Exception as e2:
+                print(f"[JSON] ❌ All methods failed: {e2}")
         
         except Exception as e:
             print(f"[JSON] ⚠️ Error: {e}")
@@ -937,9 +1033,31 @@ class Plugin:
             with open(html_path, 'w') as f:
                 f.write(content)
             
+            # Ensure file remains writable
+            try:
+                os.chmod(html_path, 0o666)
+            except:
+                pass
+            
             # If last point, finalize
             if is_last:
                 self.finalize_html(html_path)
+        
+        except PermissionError as e:
+            print(f"[HTML] ⚠️ Permission denied - trying alternative")
+            temp_path = html_path + '.tmp'
+            try:
+                with open(html_path, 'r') as f:
+                    content = f.read()
+                if '// POINTS_START' in content:
+                    content = content.replace('// POINTS_START', js_line + '// POINTS_START')
+                with open(temp_path, 'w') as f:
+                    f.write(content)
+                os.replace(temp_path, html_path)
+                if is_last:
+                    self.finalize_html(html_path)
+            except Exception as e2:
+                print(f"[HTML] ❌ All methods failed: {e2}")
         
         except Exception as e:
             print(f"[HTML] ⚠️ Error: {e}")
@@ -1134,6 +1252,28 @@ class Plugin:
                 print("   • pkg install termux-api")
                 print("   • Install Termux:API from F-Droid")
                 print("   • Grant location permission in Settings")
+            
+            # Check storage permissions
+            is_termux = os.path.exists('/data/data/com.termux')
+            if is_termux:
+                print(f"\n📁 STORAGE STATUS")
+                if os.path.exists('/sdcard/Download'):
+                    print(f"✅ /sdcard/Download/ accessible")
+                    # Test write permission
+                    test_file = '/sdcard/Download/.rangetest_permtest'
+                    try:
+                        with open(test_file, 'w') as f:
+                            f.write('test')
+                        os.remove(test_file)
+                        print(f"✅ Write permissions OK")
+                    except Exception as e:
+                        print(f"❌ Write permission denied")
+                        print(f"\n   Grant storage permission:")
+                        print(f"   • Settings → Apps → Termux → Permissions")
+                        print(f"   • Enable 'Files and media' or 'Storage'")
+                else:
+                    print(f"❌ /sdcard/Download/ not found")
+            
             print("─"*70 + "\n")
         
         elif cmd == 'rangegetlogs':
