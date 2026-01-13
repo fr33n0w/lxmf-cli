@@ -22,6 +22,24 @@ class Plugin:
         self.server_tests = {}
         self.server_threads = {}
         
+        """
+        LXMF Delivery Methods Used:
+        
+        1. Initial setup message (STARTING PING SEQUENCE): 
+           - Uses standard client.send_message() with DIRECT delivery
+           - Needs confirmation so phone knows test is starting
+        
+        2. Range test pings (RANGE TEST [n/total]):
+           - Uses OPPORTUNISTIC delivery (fire-and-forget)
+           - No retries, no queueing, no delivery confirmation
+           - Perfect for time-sensitive pings during range testing
+           - Prevents message flooding when reconnecting
+        
+        3. Completion message:
+           - Uses OPPORTUNISTIC delivery
+           - Best effort notification that test is done
+        """
+        
     def extract_link_stats(self, message):
         """Extract RSSI, SNR, and link quality from LXMF message"""
         rssi = None
@@ -175,7 +193,11 @@ class Plugin:
                                 if q is not None:
                                     print(f" | Q: {q:.1f}%", end="")
                                 print()
-                            print(f"[GPS] 💾 Written to JSON, KML, HTML")
+                            
+                            # Show where files are being written
+                            if current == 1:
+                                print(f"[FILES] 💾 Writing to: {test['log_dir']}")
+                            print(f"[FILES] ✍️  Updated JSON, KML, HTML ({current}/{total})")
                         else:
                             print(f"[GPS] ⚠️ GPS unavailable")
                         
@@ -254,7 +276,7 @@ class Plugin:
         thread.start()
     
     def _server_worker(self, phone_hash):
-        """PC worker - sends pings"""
+        """PC worker - sends pings (fire-and-forget mode)"""
         test = self.server_tests[phone_hash]
         contact = self.client.format_contact_display_short(phone_hash)
         
@@ -277,10 +299,12 @@ class Plugin:
                 msg += f"⏳ Remaining: ~{int(remaining)}s\n"
                 msg += f"📊 Progress: {int((current/total)*100)}%"
                 
-                print(f"[Range Test] 📡 Ping {current}/{total} → {contact}")
-                self.client.send_message(phone_hash, msg)
+                print(f"[Range Test] 📡 Ping {current}/{total} → {contact} (opportunistic)")
                 
-                # Wait
+                # Send with OPPORTUNISTIC method (fire-and-forget, no retries, no queueing)
+                self.send_ping_no_wait(phone_hash, msg)
+                
+                # Wait for next interval
                 for _ in range(test['interval']):
                     if test['stop_flag'].wait(1):
                         break
@@ -288,7 +312,8 @@ class Plugin:
             # Complete
             if not test['stop_flag'].is_set():
                 print(f"\n[Range Test] ✅ Ping sequence complete\n")
-                self.client.send_message(phone_hash, 
+                # Send final completion message
+                self.send_ping_no_wait(phone_hash,
                     f"✅ PING SEQUENCE COMPLETE\n"
                     f"📊 Sent {test['current']}/{test['count']} pings")
         
@@ -301,12 +326,67 @@ class Plugin:
             if phone_hash in self.server_threads:
                 del self.server_threads[phone_hash]
     
+    def send_ping_no_wait(self, dest_hash, content):
+        """Send message with OPPORTUNISTIC method - true fire-and-forget, no retries"""
+        try:
+            import RNS
+            import LXMF
+            
+            # Normalize hash
+            dest_hash_str = dest_hash.replace(":", "").replace(" ", "").replace("<", "").replace(">", "")
+            dest_hash_bytes = bytes.fromhex(dest_hash_str)
+            
+            # Get or request identity
+            dest_identity = RNS.Identity.recall(dest_hash_bytes)
+            if dest_identity is None:
+                # Quick path request without waiting
+                RNS.Transport.request_path(dest_hash_bytes)
+                time.sleep(0.5)
+                dest_identity = RNS.Identity.recall(dest_hash_bytes)
+                
+                if dest_identity is None:
+                    print(f"[Range Test] ⚠️ Cannot reach destination, skipping ping...")
+                    return
+            
+            # Create destination
+            dest = RNS.Destination(
+                dest_identity,
+                RNS.Destination.OUT,
+                RNS.Destination.SINGLE,
+                "lxmf",
+                "delivery"
+            )
+            
+            # Create message with OPPORTUNISTIC method (fire-and-forget)
+            # OPPORTUNISTIC = best effort, no retries, no queueing
+            message = LXMF.LXMessage(
+                destination=dest,
+                source=self.client.destination,
+                content=content,
+                title="",
+                desired_method=LXMF.LXMessage.OPPORTUNISTIC  # Fire-and-forget!
+            )
+            
+            # Send without registering callbacks (no tracking needed)
+            self.client.router.handle_outbound(message)
+            
+        except Exception as e:
+            print(f"[Range Test] ⚠️ Send error: {e}")
+    
     def start_client(self, server_hash, count, interval, server_name):
         """PHONE MODE - Prepare to receive pings and log GPS"""
         
-        # Create log directory
-        log_dir = os.path.join(self.client.storage_path, "rangetest_logs")
-        os.makedirs(log_dir, exist_ok=True)
+        # Determine save directory based on platform
+        is_termux = os.path.exists('/data/data/com.termux')
+        
+        if is_termux and os.path.exists('/sdcard/Download'):
+            # Save directly to Download folder on Termux
+            log_dir = '/sdcard/Download'
+            print(f"\n[Range Test] 📱 Termux detected - saving to /sdcard/Download/")
+        else:
+            # Fallback to app storage
+            log_dir = os.path.join(self.client.storage_path, "rangetest_logs")
+            os.makedirs(log_dir, exist_ok=True)
         
         # Create file names
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -345,7 +425,8 @@ class Plugin:
             'json_path': json_path,
             'html_path': html_path,
             'kml_path': kml_path,
-            'server_name': server_name
+            'server_name': server_name,
+            'log_dir': log_dir
         }
         
         print(f"\n{'─'*70}")
@@ -354,7 +435,8 @@ class Plugin:
         print(f"📡 Server: {server_name}")
         print(f"📊 Expecting: {count} pings @ {interval}s")
         print(f"📍 GPS: Incremental logging")
-        print(f"💾 Files:")
+        print(f"💾 Save location: {log_dir}")
+        print(f"📄 Files:")
         print(f"   {json_file}")
         print(f"   {kml_file}")
         print(f"   {html_file}")
@@ -891,55 +973,40 @@ class Plugin:
         test = self.active_tests[server_hash]
         elapsed = time.time() - test['start_time']
         
+        # Finalize all files (ensure they're closed properly)
+        self.finalize_html(test['html_path'])
+        self.finalize_kml(test['kml_path'])
+        
         print(f"\n{'─'*70}")
         print(f"🎉 RANGE TEST COMPLETE!")
         print(f"{'─'*70}")
         print(f"📡 Server: {test['server_name']}")
         print(f"📊 Received: {test['received']}/{test['count']}")
         print(f"⏱️ Duration: {int(elapsed/60)}m {int(elapsed%60)}s")
-        print(f"💾 Files:")
+        print(f"💾 Files saved to:")
+        print(f"   {test['log_dir']}")
+        print(f"\n📄 Files:")
         print(f"   {os.path.basename(test['json_path'])}")
         print(f"   {os.path.basename(test['kml_path'])}")
         print(f"   {os.path.basename(test['html_path'])}")
+        print(f"{'─'*70}")
         
-        # Auto-copy to /sdcard/Download/ if on Termux
+        # Show appropriate instructions based on platform
         is_termux = os.path.exists('/data/data/com.termux')
-        if is_termux:
-            download_dir = '/sdcard/Download'
-            if os.path.exists(download_dir):
-                try:
-                    import shutil
-                    
-                    # Copy all three files
-                    for src_path in [test['json_path'], test['kml_path'], test['html_path']]:
-                        filename = os.path.basename(src_path)
-                        dest_path = os.path.join(download_dir, filename)
-                        shutil.copy2(src_path, dest_path)
-                    
-                    print(f"{'─'*70}")
-                    print(f"✅ Auto-copied to /sdcard/Download/")
-                    print(f"{'─'*70}")
-                    print(f"\n📱 Access files in:")
-                    print(f"   • File Manager → Download folder")
-                    print(f"   • Share from Download folder to apps")
-                except Exception as e:
-                    print(f"{'─'*70}")
-                    print(f"⚠️ Auto-copy failed: {e}")
-                    print(f"\n💡 Manual copy:")
-                    print(f"   cp {test['json_path']} /sdcard/Download/")
-                    print(f"   cp {test['kml_path']} /sdcard/Download/")
-                    print(f"   cp {test['html_path']} /sdcard/Download/")
-            else:
-                print(f"{'─'*70}")
-                print(f"⚠️ /sdcard/Download/ not found")
-                print(f"\n💡 Copy manually if needed")
+        if is_termux and '/sdcard/Download' in test['log_dir']:
+            print(f"\n✅ Files are in your Download folder!")
+            print(f"\n📱 Access files:")
+            print(f"   • File Manager → Download folder")
+            print(f"   • Open HTML map directly from Download")
+            print(f"   • Share/import KML to mapping apps")
         else:
-            print(f"{'─'*70}")
+            print(f"\n💡 Copy to shared storage:")
+            print(f"   cp {test['json_path']} /sdcard/Download/")
+            print(f"   cp {test['kml_path']} /sdcard/Download/")
+            print(f"   cp {test['html_path']} /sdcard/Download/")
         
         print(f"\n💡 Open HTML map:")
         print(f"   termux-open {test['html_path']}")
-        print(f"\n💡 Import KML to maps:")
-        print(f"   Open in Google Earth, OsmAnd, or other mapping app")
         print(f"\n🗺️ All formats ready!\n")
         
         del self.active_tests[server_hash]
@@ -957,25 +1024,12 @@ class Plugin:
         
         print(f"\n⚠️ Test stopped early")
         print(f"📊 Received: {test['received']}/{test['count']}")
-        print(f"💾 All files saved (JSON, KML, HTML)")
+        print(f"💾 Files saved to: {test['log_dir']}")
+        print(f"\n📄 All formats saved (JSON, KML, HTML)")
         
-        # Auto-copy to /sdcard/Download/ if on Termux
         is_termux = os.path.exists('/data/data/com.termux')
-        if is_termux:
-            download_dir = '/sdcard/Download'
-            if os.path.exists(download_dir):
-                try:
-                    import shutil
-                    
-                    # Copy all three files
-                    for src_path in [test['json_path'], test['kml_path'], test['html_path']]:
-                        filename = os.path.basename(src_path)
-                        dest_path = os.path.join(download_dir, filename)
-                        shutil.copy2(src_path, dest_path)
-                    
-                    print(f"\n✅ Auto-copied to /sdcard/Download/\n")
-                except Exception as e:
-                    print(f"\n⚠️ Auto-copy failed: {e}\n")
+        if is_termux and '/sdcard/Download' in test['log_dir']:
+            print(f"✅ Files are in your Download folder!\n")
         
         del self.active_tests[server_hash]
     
