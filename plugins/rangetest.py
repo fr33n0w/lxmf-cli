@@ -12,7 +12,7 @@ import re
 class Plugin:
     def __init__(self, client):
         self.client = client
-        self.commands = ['rangetest', 'rangestop', 'rangestatus', 'rangegetlogs']
+        self.commands = ['rangetest', 'rangestop', 'rangestatus', 'rangegetlogs', 'rangeexport']
         self.description = "Range testing - incremental GPS logging with HTML map, KML, and JSON"
         
         # PHONE MODE - receives pings, logs GPS
@@ -376,17 +376,9 @@ class Plugin:
     def start_client(self, server_hash, count, interval, server_name):
         """PHONE MODE - Prepare to receive pings and log GPS"""
         
-        # Determine save directory based on platform
-        is_termux = os.path.exists('/data/data/com.termux')
-        
-        if is_termux and os.path.exists('/sdcard/Download'):
-            # Save directly to Download folder on Termux
-            log_dir = '/sdcard/Download'
-            print(f"\n[Range Test] 📱 Termux detected - saving to /sdcard/Download/")
-        else:
-            # Fallback to app storage
-            log_dir = os.path.join(self.client.storage_path, "rangetest_logs")
-            os.makedirs(log_dir, exist_ok=True)
+        # Always use app storage for writing (we have full permissions there)
+        log_dir = os.path.join(self.client.storage_path, "rangetest_logs")
+        os.makedirs(log_dir, exist_ok=True)
         
         # Create file names
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -400,56 +392,22 @@ class Plugin:
         html_path = os.path.join(log_dir, html_file)
         kml_path = os.path.join(log_dir, kml_file)
         
-        # Initialize JSON with proper permissions
-        try:
-            with open(json_path, 'w') as f:
-                json.dump({
-                    'server': server_name,
-                    'timestamp': timestamp,
-                    'test_start': datetime.now().isoformat(),
-                    'expected_pings': count,
-                    'interval': interval,
-                    'gps_points': []
-                }, f, indent=2)
-            
-            # Set file permissions to be fully writable
-            if is_termux:
-                os.chmod(json_path, 0o666)
-        except Exception as e:
-            print(f"[Range Test] ⚠️ Error creating JSON: {e}")
-            # Fall back to app storage
-            log_dir = os.path.join(self.client.storage_path, "rangetest_logs")
-            os.makedirs(log_dir, exist_ok=True)
-            json_path = os.path.join(log_dir, json_file)
-            with open(json_path, 'w') as f:
-                json.dump({
-                    'server': server_name,
-                    'timestamp': timestamp,
-                    'test_start': datetime.now().isoformat(),
-                    'expected_pings': count,
-                    'interval': interval,
-                    'gps_points': []
-                }, f, indent=2)
+        # Initialize JSON
+        with open(json_path, 'w') as f:
+            json.dump({
+                'server': server_name,
+                'timestamp': timestamp,
+                'test_start': datetime.now().isoformat(),
+                'expected_pings': count,
+                'interval': interval,
+                'gps_points': []
+            }, f, indent=2)
         
         # Initialize KML
-        try:
-            self.init_kml_file(kml_path, server_name)
-            if is_termux:
-                os.chmod(kml_path, 0o666)
-        except Exception as e:
-            print(f"[Range Test] ⚠️ Error creating KML: {e}")
-            kml_path = os.path.join(log_dir, kml_file)
-            self.init_kml_file(kml_path, server_name)
+        self.init_kml_file(kml_path, server_name)
         
         # Initialize HTML map
-        try:
-            self.init_html_file(html_path, server_name)
-            if is_termux:
-                os.chmod(html_path, 0o666)
-        except Exception as e:
-            print(f"[Range Test] ⚠️ Error creating HTML: {e}")
-            html_path = os.path.join(log_dir, html_file)
-            self.init_html_file(html_path, server_name)
+        self.init_html_file(html_path, server_name)
         
         self.active_tests[server_hash] = {
             'count': count,
@@ -460,8 +418,7 @@ class Plugin:
             'html_path': html_path,
             'kml_path': kml_path,
             'server_name': server_name,
-            'log_dir': log_dir,
-            'is_termux': is_termux
+            'log_dir': log_dir
         }
         
         print(f"\n{'─'*70}")
@@ -470,7 +427,7 @@ class Plugin:
         print(f"📡 Server: {server_name}")
         print(f"📊 Expecting: {count} pings @ {interval}s")
         print(f"📍 GPS: Incremental logging")
-        print(f"💾 Save location: {log_dir}")
+        print(f"💾 Writing to: {log_dir}")
         print(f"📄 Files:")
         print(f"   {json_file}")
         print(f"   {kml_file}")
@@ -594,31 +551,9 @@ class Plugin:
             with open(kml_path, 'w') as f:
                 f.write(content)
             
-            # Ensure file remains writable
-            try:
-                os.chmod(kml_path, 0o666)
-            except:
-                pass
-            
             # If last point, finalize KML
             if is_last:
                 self.finalize_kml(kml_path)
-        
-        except PermissionError as e:
-            print(f"[KML] ⚠️ Permission denied - trying alternative")
-            temp_path = kml_path + '.tmp'
-            try:
-                with open(kml_path, 'r') as f:
-                    content = f.read()
-                if '<!-- POINTS_START -->' in content:
-                    content = content.replace('<!-- POINTS_START -->', placemark + '<!-- POINTS_START -->')
-                with open(temp_path, 'w') as f:
-                    f.write(content)
-                os.replace(temp_path, kml_path)
-                if is_last:
-                    self.finalize_kml(kml_path)
-            except Exception as e2:
-                print(f"[KML] ❌ All methods failed: {e2}")
         
         except Exception as e:
             print(f"[KML] ⚠️ Error: {e}")
@@ -979,29 +914,9 @@ class Plugin:
             # Append new point
             data['gps_points'].append(gps_point)
             
-            # Write back with explicit mode
+            # Write back
             with open(json_path, 'w') as f:
                 json.dump(data, f, indent=2)
-            
-            # Ensure file remains writable on Android
-            try:
-                os.chmod(json_path, 0o666)
-            except:
-                pass
-        
-        except PermissionError as e:
-            print(f"[JSON] ⚠️ Permission denied - trying alternative method")
-            # Try alternative: append to a temporary file and rename
-            temp_path = json_path + '.tmp'
-            try:
-                with open(json_path, 'r') as f:
-                    data = json.load(f)
-                data['gps_points'].append(gps_point)
-                with open(temp_path, 'w') as f:
-                    json.dump(data, f, indent=2)
-                os.replace(temp_path, json_path)
-            except Exception as e2:
-                print(f"[JSON] ❌ All methods failed: {e2}")
         
         except Exception as e:
             print(f"[JSON] ⚠️ Error: {e}")
@@ -1033,31 +948,9 @@ class Plugin:
             with open(html_path, 'w') as f:
                 f.write(content)
             
-            # Ensure file remains writable
-            try:
-                os.chmod(html_path, 0o666)
-            except:
-                pass
-            
             # If last point, finalize
             if is_last:
                 self.finalize_html(html_path)
-        
-        except PermissionError as e:
-            print(f"[HTML] ⚠️ Permission denied - trying alternative")
-            temp_path = html_path + '.tmp'
-            try:
-                with open(html_path, 'r') as f:
-                    content = f.read()
-                if '// POINTS_START' in content:
-                    content = content.replace('// POINTS_START', js_line + '// POINTS_START')
-                with open(temp_path, 'w') as f:
-                    f.write(content)
-                os.replace(temp_path, html_path)
-                if is_last:
-                    self.finalize_html(html_path)
-            except Exception as e2:
-                print(f"[HTML] ❌ All methods failed: {e2}")
         
         except Exception as e:
             print(f"[HTML] ⚠️ Error: {e}")
@@ -1101,33 +994,62 @@ class Plugin:
         print(f"📡 Server: {test['server_name']}")
         print(f"📊 Received: {test['received']}/{test['count']}")
         print(f"⏱️ Duration: {int(elapsed/60)}m {int(elapsed%60)}s")
-        print(f"💾 Files saved to:")
+        print(f"💾 Files in Termux storage:")
         print(f"   {test['log_dir']}")
-        print(f"\n📄 Files:")
-        print(f"   {os.path.basename(test['json_path'])}")
-        print(f"   {os.path.basename(test['kml_path'])}")
-        print(f"   {os.path.basename(test['html_path'])}")
-        print(f"{'─'*70}")
         
-        # Show appropriate instructions based on platform
-        is_termux = os.path.exists('/data/data/com.termux')
-        if is_termux and '/sdcard/Download' in test['log_dir']:
-            print(f"\n✅ Files are in your Download folder!")
+        # Auto-export to /sdcard/Download/
+        exported = self.export_files_to_download(test['json_path'], test['kml_path'], test['html_path'])
+        
+        if exported:
+            print(f"\n✅ Exported to /sdcard/Download/")
             print(f"\n📱 Access files:")
             print(f"   • File Manager → Download folder")
-            print(f"   • Open HTML map directly from Download")
-            print(f"   • Share/import KML to mapping apps")
+            print(f"   • Open HTML map from Downloads")
+            print(f"   • Import KML to mapping apps")
         else:
-            print(f"\n💡 Copy to shared storage:")
-            print(f"   cp {test['json_path']} /sdcard/Download/")
-            print(f"   cp {test['kml_path']} /sdcard/Download/")
-            print(f"   cp {test['html_path']} /sdcard/Download/")
+            print(f"\n💡 To export files:")
+            print(f"   rangeexport")
         
-        print(f"\n💡 Open HTML map:")
-        print(f"   termux-open {test['html_path']}")
         print(f"\n🗺️ All formats ready!\n")
         
         del self.active_tests[server_hash]
+    
+    def export_files_to_download(self, json_path, kml_path, html_path):
+        """Export files to /sdcard/Download/ using termux-share or cp"""
+        is_termux = os.path.exists('/data/data/com.termux')
+        
+        if not is_termux:
+            return False
+        
+        download_dir = '/sdcard/Download'
+        
+        if not os.path.exists(download_dir):
+            print(f"⚠️ /sdcard/Download/ not found")
+            return False
+        
+        try:
+            import shutil
+            
+            # Copy all three files
+            copied = 0
+            for src_path in [json_path, kml_path, html_path]:
+                if os.path.exists(src_path):
+                    filename = os.path.basename(src_path)
+                    dest_path = os.path.join(download_dir, filename)
+                    
+                    # Use shutil.copy which works better with Android
+                    shutil.copy(src_path, dest_path)
+                    copied += 1
+            
+            return copied == 3
+        
+        except Exception as e:
+            print(f"⚠️ Export error: {e}")
+            print(f"\n💡 Manual export:")
+            print(f"   cp {json_path} /sdcard/Download/")
+            print(f"   cp {kml_path} /sdcard/Download/")
+            print(f"   cp {html_path} /sdcard/Download/")
+            return False
     
     def finalize_test(self, server_hash):
         """PHONE - Stop early"""
@@ -1142,12 +1064,15 @@ class Plugin:
         
         print(f"\n⚠️ Test stopped early")
         print(f"📊 Received: {test['received']}/{test['count']}")
-        print(f"💾 Files saved to: {test['log_dir']}")
-        print(f"\n📄 All formats saved (JSON, KML, HTML)")
+        print(f"💾 Files saved in Termux storage")
         
-        is_termux = os.path.exists('/data/data/com.termux')
-        if is_termux and '/sdcard/Download' in test['log_dir']:
-            print(f"✅ Files are in your Download folder!\n")
+        # Auto-export
+        exported = self.export_files_to_download(test['json_path'], test['kml_path'], test['html_path'])
+        
+        if exported:
+            print(f"✅ Exported to /sdcard/Download/\n")
+        else:
+            print(f"\n💡 To export: rangeexport\n")
         
         del self.active_tests[server_hash]
     
@@ -1289,23 +1214,86 @@ class Plugin:
                         print(f"  {f} ({size:,} bytes)")
                     print("─"*70)
                     print(f"\nLog directory: {log_dir}")
-                    print(f"\n💡 Copy to shared storage:")
-                    print(f"   cp {log_dir}/*.{{html,json,kml}} /sdcard/Download/")
+                    print(f"\n💡 Export latest to /sdcard/Download/:")
+                    print(f"   rangeexport")
                     print(f"\n💡 Open latest map:")
                     latest_html = next((f for f in files if f.endswith('.html')), None)
                     if latest_html:
-                        print(f"   termux-open {log_dir}/{latest_html}")
-                    print(f"\n💡 Import KML to mapping apps:")
-                    latest_kml = next((f for f in files if f.endswith('.kml')), None)
-                    if latest_kml:
-                        print(f"   Open {latest_kml} in Google Earth, OsmAnd, etc.")
-                    print(f"\n💡 Share file:")
-                    if latest_html:
-                        print(f"   termux-share {log_dir}/{latest_html}\n")
+                        print(f"   termux-open {log_dir}/{latest_html}\n")
                 else:
                     print("\n📁 No logs found\n")
             else:
                 print("\n📁 No logs directory found\n")
+        
+        elif cmd == 'rangeexport':
+            log_dir = os.path.join(self.client.storage_path, "rangetest_logs")
+            if not os.path.exists(log_dir):
+                print("\n📁 No logs directory found\n")
+                return
+            
+            # Get all range test files
+            all_files = []
+            for filename in os.listdir(log_dir):
+                if filename.startswith('rangetest_') and filename.endswith(('.html', '.json', '.kml')):
+                    all_files.append(filename)
+            
+            if not all_files:
+                print("\n📁 No range test files found\n")
+                return
+            
+            # Group files by timestamp
+            file_groups = {}
+            for f in all_files:
+                # Extract timestamp from filename (rangetest_NAME_YYYYMMDD_HHMMSS.ext)
+                parts = f.rsplit('_', 2)
+                if len(parts) >= 3:
+                    timestamp_part = f"{parts[-2]}_{parts[-1].split('.')[0]}"
+                    if timestamp_part not in file_groups:
+                        file_groups[timestamp_part] = []
+                    file_groups[timestamp_part].append(f)
+            
+            # Find latest complete set (has all 3 files)
+            latest_set = None
+            for timestamp in sorted(file_groups.keys(), reverse=True):
+                files_in_set = file_groups[timestamp]
+                has_json = any(f.endswith('.json') for f in files_in_set)
+                has_kml = any(f.endswith('.kml') for f in files_in_set)
+                has_html = any(f.endswith('.html') for f in files_in_set)
+                
+                if has_json and has_kml and has_html:
+                    latest_set = files_in_set
+                    break
+            
+            if not latest_set:
+                print("\n⚠️ No complete range test found (need JSON, KML, and HTML)\n")
+                return
+            
+            # Get full paths
+            json_path = kml_path = html_path = None
+            for f in latest_set:
+                full_path = os.path.join(log_dir, f)
+                if f.endswith('.json'):
+                    json_path = full_path
+                elif f.endswith('.kml'):
+                    kml_path = full_path
+                elif f.endswith('.html'):
+                    html_path = full_path
+            
+            print(f"\n📤 Exporting latest range test...")
+            print(f"   {os.path.basename(json_path)}")
+            print(f"   {os.path.basename(kml_path)}")
+            print(f"   {os.path.basename(html_path)}")
+            
+            exported = self.export_files_to_download(json_path, kml_path, html_path)
+            
+            if exported:
+                print(f"\n✅ Exported to /sdcard/Download/")
+                print(f"\n📱 Files ready to:")
+                print(f"   • Open in File Manager")
+                print(f"   • Share with other apps")
+                print(f"   • Import KML to maps\n")
+            else:
+                print(f"\n❌ Export failed\n")
         
         elif cmd == 'rangestop':
             if len(parts) < 2:
