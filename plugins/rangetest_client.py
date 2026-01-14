@@ -5,11 +5,12 @@ import subprocess
 import os
 import shutil
 from datetime import datetime
+import threading
 
 class Plugin:
     def __init__(self, client):
         self.client = client
-        self.commands = ['rangelogs', 'rl', 'rangeexport', 'rex', 'rangestatus']
+        self.commands = ['rangelogs', 'rl', 'rangeexport', 'rex', 'rangestatus', 'rangeclear']
         self.description = "Range Test Client - Log GPS positions from range test pings"
         
         # File paths in Termux storage (persistent, incremental)
@@ -23,8 +24,38 @@ class Plugin:
         # Initialize files if they don't exist
         self.init_files()
         
-        # GPS provider preference
-        self.gps_providers = ['gps', 'network', 'passive']
+        # GPS cache and settings
+        self.last_gps = None
+        self.last_gps_time = 0
+        self.gps_cache_timeout = 30  # Use cached GPS if less than 30s old
+        self.gps_lock = threading.Lock()
+        
+        # GPS warm-up on startup
+        self.warmup_gps()
+    
+    def warmup_gps(self):
+        """Warm up GPS on plugin load"""
+        is_termux = os.path.exists('/data/data/com.termux')
+        if not is_termux:
+            return
+        
+        print("[Range Client] 📡 Warming up GPS...")
+        
+        # Start GPS in background
+        def warmup():
+            try:
+                # Try to get location (this warms up GPS)
+                subprocess.run(
+                    ['termux-location', '-p', 'gps'],
+                    capture_output=True,
+                    timeout=15,
+                    env=os.environ.copy()
+                )
+            except:
+                pass
+        
+        thread = threading.Thread(target=warmup, daemon=True)
+        thread.start()
     
     def init_files(self):
         """Initialize all data files if they don't exist"""
@@ -150,7 +181,7 @@ class Plugin:
             return '#ff0000';
         }
         
-        function addPoint(lat, lon, timestamp, date, time, accuracy, rssi, snr, q, provider) {
+        function addPoint(lat, lon, date, time, accuracy, rssi, snr, q, provider) {
             points.push([lat, lon]);
             
             var color = getSignalColor(rssi);
@@ -213,8 +244,8 @@ class Plugin:
                 print(f"{'='*60}")
                 print(f"Message: {content}")
                 
-                # Get GPS location
-                gps_data = self.get_gps_location()
+                # Get GPS location (with multiple attempts)
+                gps_data = self.get_gps_location_robust()
                 
                 if gps_data:
                     # Extract signal data from message
@@ -238,7 +269,19 @@ class Plugin:
                     # Notify
                     self.notify_saved()
                 else:
-                    print(f"[GPS] ❌ GPS unavailable - point not logged")
+                    print(f"[GPS] ❌ GPS unavailable after all attempts")
+                    print(f"      Using last known position if available...")
+                    
+                    # Fallback: use cached GPS if less than 2 minutes old
+                    if self.last_gps and (time.time() - self.last_gps_time) < 120:
+                        age = int(time.time() - self.last_gps_time)
+                        print(f"[GPS] 📍 Using cached GPS ({age}s old)")
+                        
+                        rssi, snr, q = self.extract_link_stats(message)
+                        self.save_point(self.last_gps, rssi, snr, q)
+                        self.notify_saved()
+                    else:
+                        print(f"[GPS] ⚠️ No cached GPS available - point NOT logged")
                 
                 print(f"{'='*60}\n")
                 
@@ -250,6 +293,130 @@ class Plugin:
             traceback.print_exc()
         
         return False
+    
+    def get_gps_location_robust(self):
+        """Get GPS location with multiple attempts and fallbacks"""
+        is_termux = os.path.exists('/data/data/com.termux')
+        
+        if not is_termux:
+            return None
+        
+        with self.gps_lock:
+            # Strategy 1: Try network first (fastest, works indoors)
+            print("[GPS] Attempt 1: Network provider...")
+            gps = self.try_gps_provider('network', timeout=3)
+            if gps:
+                self.last_gps = gps
+                self.last_gps_time = time.time()
+                return gps
+            
+            # Strategy 2: Try GPS provider (accurate but slow)
+            print("[GPS] Attempt 2: GPS provider...")
+            gps = self.try_gps_provider('gps', timeout=10)
+            if gps:
+                self.last_gps = gps
+                self.last_gps_time = time.time()
+                return gps
+            
+            # Strategy 3: Try passive provider
+            print("[GPS] Attempt 3: Passive provider...")
+            gps = self.try_gps_provider('passive', timeout=3)
+            if gps:
+                self.last_gps = gps
+                self.last_gps_time = time.time()
+                return gps
+            
+            # Strategy 4: Try default (no provider specified)
+            print("[GPS] Attempt 4: Default provider...")
+            gps = self.try_gps_provider(None, timeout=5)
+            if gps:
+                self.last_gps = gps
+                self.last_gps_time = time.time()
+                return gps
+            
+            # Strategy 5: Try with -r once flag (single update)
+            print("[GPS] Attempt 5: Single update mode...")
+            gps = self.try_gps_single_update()
+            if gps:
+                self.last_gps = gps
+                self.last_gps_time = time.time()
+                return gps
+            
+            return None
+    
+    def try_gps_provider(self, provider, timeout=5):
+        """Try to get GPS from specific provider"""
+        try:
+            if provider:
+                cmd = ['termux-location', '-p', provider]
+            else:
+                cmd = ['termux-location']
+            
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env=os.environ.copy()
+            )
+            
+            if result.returncode == 0 and result.stdout.strip():
+                try:
+                    data = json.loads(result.stdout.strip())
+                    
+                    if 'latitude' in data and 'longitude' in data:
+                        lat = data.get('latitude')
+                        lon = data.get('longitude')
+                        
+                        # Validate coordinates
+                        if lat and lon and (abs(lat) > 0.001 or abs(lon) > 0.001):
+                            # Add provider info
+                            if 'provider' not in data:
+                                data['provider'] = provider if provider else 'default'
+                            
+                            print(f"[GPS] ✅ Got location from {data['provider']}")
+                            return data
+                except json.JSONDecodeError as e:
+                    print(f"[GPS] ⚠️ JSON decode error: {e}")
+        
+        except subprocess.TimeoutExpired:
+            print(f"[GPS] ⏱️ Timeout")
+        except FileNotFoundError:
+            print(f"[GPS] ❌ termux-location not found - install termux-api package")
+        except Exception as e:
+            print(f"[GPS] ⚠️ Error: {e}")
+        
+        return None
+    
+    def try_gps_single_update(self):
+        """Try GPS with -r once flag (request single update)"""
+        try:
+            result = subprocess.run(
+                ['termux-location', '-r', 'once'],
+                capture_output=True,
+                text=True,
+                timeout=8,
+                env=os.environ.copy()
+            )
+            
+            if result.returncode == 0 and result.stdout.strip():
+                data = json.loads(result.stdout.strip())
+                
+                if 'latitude' in data and 'longitude' in data:
+                    lat = data.get('latitude')
+                    lon = data.get('longitude')
+                    
+                    if lat and lon and (abs(lat) > 0.001 or abs(lon) > 0.001):
+                        if 'provider' not in data:
+                            data['provider'] = 'once'
+                        
+                        print(f"[GPS] ✅ Got location (single update)")
+                        return data
+        
+        except Exception as e:
+            print(f"[GPS] ⚠️ Single update error: {e}")
+        
+        return None
     
     def extract_link_stats(self, message):
         """Extract RSSI, SNR, and link quality from LXMF message"""
@@ -286,50 +453,6 @@ class Plugin:
             pass
         
         return rssi, snr, q
-    
-    def get_gps_location(self):
-        """Get GPS location - prefer GPS, fallback to network"""
-        is_termux = os.path.exists('/data/data/com.termux')
-        
-        if not is_termux:
-            return None
-        
-        try:
-            # Try providers in order: gps (satellite), network, passive
-            for provider in self.gps_providers:
-                try:
-                    result = subprocess.run(
-                        ['termux-location', '-p', provider],
-                        capture_output=True,
-                        text=True,
-                        timeout=8 if provider == 'gps' else 5,
-                        env=os.environ.copy()
-                    )
-                    
-                    if result.returncode == 0 and result.stdout:
-                        data = json.loads(result.stdout.strip())
-                        
-                        if 'latitude' in data and 'longitude' in data:
-                            lat = data.get('latitude')
-                            lon = data.get('longitude')
-                            
-                            if lat and lon and (abs(lat) > 0.001 or abs(lon) > 0.001):
-                                data['provider'] = provider
-                                print(f"[GPS] Using provider: {provider}")
-                                return data
-                
-                except subprocess.TimeoutExpired:
-                    print(f"[GPS] Provider {provider} timeout, trying next...")
-                    continue
-                except json.JSONDecodeError:
-                    continue
-                except Exception:
-                    continue
-            
-            return None
-        
-        except Exception:
-            return None
     
     def save_point(self, gps_data, rssi=None, snr=None, q=None):
         """Save GPS point to all file formats"""
@@ -597,16 +720,58 @@ class Plugin:
                         data = json.load(f)
                         point_count = len(data.get('points', []))
                         print(f"\n  Total Points: {point_count}")
+                        
+                        if point_count > 0:
+                            # Show last point info
+                            last_point = data['points'][-1]
+                            print(f"  Last Point: {last_point.get('date')} {last_point.get('time')}")
+                            print(f"              {last_point.get('latitude'):.6f}, {last_point.get('longitude'):.6f}")
+                            print(f"              Provider: {last_point.get('provider')}")
                 except:
                     pass
                 
                 print("─"*60)
                 print(f"\n💡 Commands:")
-                print(f"   rangeexport (rex) - Export to /sdcard/Download/")
-                print(f"   rangestatus       - Check GPS status\n")
+                print(f"   rangeexport (rex)  - Export to /sdcard/Download/")
+                print(f"   rangestatus        - Check GPS status")
+                print(f"   rangeclear         - Clear all logged points\n")
             
             elif cmd in ['rangeexport', 'rex']:
                 self.export_files()
+            
+            elif cmd == 'rangeclear':
+                # Confirm before clearing
+                print(f"\n⚠️ This will delete all logged points!")
+                
+                try:
+                    with open(self.json_file, 'r') as f:
+                        data = json.load(f)
+                        point_count = len(data.get('points', []))
+                    
+                    if point_count == 0:
+                        print(f"✅ No points to clear\n")
+                        return
+                    
+                    print(f"   Current points: {point_count}")
+                    print(f"\n💡 Export first with: rangeexport")
+                    print(f"   Then confirm clear with: rangeclear confirm\n")
+                
+                except:
+                    print(f"❌ Error reading points\n")
+            
+            elif cmd == 'rangeclear' and len(parts) > 1 and parts[1] == 'confirm':
+                # Clear all files
+                print(f"\n🗑️ Clearing all range test data...")
+                
+                for filepath in [self.json_file, self.kml_file, self.csv_file, 
+                                self.geojson_file, self.html_file]:
+                    if os.path.exists(filepath):
+                        os.remove(filepath)
+                
+                # Re-initialize
+                self.init_files()
+                
+                print(f"✅ All points cleared - files reset\n")
             
             elif cmd == 'rangestatus':
                 print(f"\n📍 GPS STATUS")
@@ -619,50 +784,75 @@ class Plugin:
                     print("   GPS logging only works on Android with Termux\n")
                     return
                 
-                # Test GPS
-                print("Testing GPS providers...\n")
+                # Check if termux-api is installed
+                try:
+                    result = subprocess.run(['which', 'termux-location'], 
+                                          capture_output=True, text=True)
+                    if result.returncode != 0:
+                        print("❌ termux-location not found")
+                        print("\n💡 Install with:")
+                        print("   pkg install termux-api")
+                        print("   (Also install Termux:API app from F-Droid)\n")
+                        return
+                except:
+                    pass
                 
-                for provider in self.gps_providers:
-                    print(f"Testing {provider}...", end=" ")
-                    try:
-                        result = subprocess.run(
-                            ['termux-location', '-p', provider],
-                            capture_output=True,
-                            text=True,
-                            timeout=8 if provider == 'gps' else 5,
-                            env=os.environ.copy()
-                        )
-                        
-                        if result.returncode == 0 and result.stdout:
-                            data = json.loads(result.stdout.strip())
-                            
-                            if 'latitude' in data and 'longitude' in data:
-                                lat = data.get('latitude')
-                                lon = data.get('longitude')
-                                acc = data.get('accuracy', 0)
-                                
-                                if lat and lon and (abs(lat) > 0.001 or abs(lon) > 0.001):
-                                    print(f"✅ Working")
-                                    print(f"   Lat: {lat:.6f}, Lon: {lon:.6f}")
-                                    print(f"   Accuracy: ±{acc:.0f}m")
-                                else:
-                                    print("⚠️ Invalid coordinates")
-                            else:
-                                print("❌ No location data")
-                        else:
-                            print("❌ Failed")
+                # Show cached GPS
+                if self.last_gps:
+                    age = int(time.time() - self.last_gps_time)
+                    print(f"📍 Cached GPS (age: {age}s):")
+                    print(f"   Lat: {self.last_gps['latitude']:.6f}")
+                    print(f"   Lon: {self.last_gps['longitude']:.6f}")
+                    print(f"   Provider: {self.last_gps.get('provider', 'unknown')}")
+                    print()
+                
+                # Test GPS providers
+                print("Testing GPS providers (this may take a moment)...\n")
+                
+                # Quick tests
+                providers = [
+                    ('network', 3),
+                    ('gps', 10),
+                    ('passive', 3)
+                ]
+                
+                working_provider = None
+                
+                for provider, timeout in providers:
+                    print(f"Testing {provider}... ", end="", flush=True)
+                    gps = self.try_gps_provider(provider, timeout)
                     
-                    except subprocess.TimeoutExpired:
-                        print("⏱️ Timeout")
-                    except json.JSONDecodeError:
-                        print("❌ Invalid data")
-                    except Exception as e:
-                        print(f"❌ Error: {e}")
+                    if gps:
+                        print(f"✅ Working")
+                        print(f"   Lat: {gps['latitude']:.6f}, Lon: {gps['longitude']:.6f}")
+                        print(f"   Accuracy: ±{gps.get('accuracy', 0):.0f}m")
+                        working_provider = provider
+                        break
+                    else:
+                        print(f"❌ Failed")
                 
-                print("\n📱 GPS SETUP")
-                print("   • Install: pkg install termux-api")
-                print("   • Install: Termux:API app from F-Droid")
-                print("   • Grant: Location permission in Settings")
+                if not working_provider:
+                    print(f"\n⚠️ No GPS providers working!\n")
+                    print(f"💡 Troubleshooting:")
+                    print(f"   1. Check permissions:")
+                    print(f"      Settings → Apps → Termux → Permissions")
+                    print(f"      Enable: Location (allow all the time)")
+                    print(f"   ")
+                    print(f"   2. Disable battery optimization:")
+                    print(f"      Settings → Apps → Termux → Battery")
+                    print(f"      Set to: Unrestricted")
+                    print(f"   ")
+                    print(f"   3. Test manually:")
+                    print(f"      termux-location -p network")
+                    print(f"      termux-location -p gps")
+                    print(f"   ")
+                    print(f"   4. Update Termux:API:")
+                    print(f"      pkg upgrade termux-api")
+                    print(f"      (Update Termux:API app from F-Droid too)")
+                    print(f"   ")
+                    print(f"   5. Try going outside for GPS fix")
+                else:
+                    print(f"\n✅ GPS is working with {working_provider} provider")
                 
                 # Check storage
                 print(f"\n📁 STORAGE STATUS")
