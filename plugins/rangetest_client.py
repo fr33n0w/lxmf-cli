@@ -90,344 +90,262 @@ class Plugin:
         
         with open(self.kml_file, 'w') as f:
             f.write(kml_header + kml_footer)
+    
+    def init_html(self):
+        """Initialize HTML map file with path and signal-based coloring"""
+        html = '''<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Range Test Coverage Map</title>
+    <style>
+        body { margin: 0; padding: 0; font-family: Arial, sans-serif; }
+        #map { position: absolute; top: 0; bottom: 140px; width: 100%; }
+        #info {
+            position: absolute; bottom: 0; width: 100%; height: 140px;
+            background: rgba(255, 255, 255, 0.95); padding: 15px;
+            box-sizing: border-box; border-top: 3px solid #0078d4;
+            overflow-y: auto;
+        }
+        .stat { display: inline-block; margin-right: 20px; margin-bottom: 5px; font-size: 14px; }
+        .stat-label { font-weight: bold; color: #0078d4; }
+        .legend {
+            background: white;
+            padding: 10px;
+            border-radius: 5px;
+            box-shadow: 0 1px 5px rgba(0,0,0,0.4);
+        }
+        .legend-item {
+            margin: 5px 0;
+            font-size: 12px;
+        }
+        @media (max-width: 600px) {
+            #info { height: 160px; }
+            .stat { display: block; margin: 3px 0; }
+        }
+    </style>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+</head>
+<body>
+    <div id="map"></div>
+    <div id="info">
+        <div class="stat"><span class="stat-label">Total Points:</span> <span id="points">0</span></div>
+        <div class="stat"><span class="stat-label">Distance:</span> <span id="distance">0 km</span></div>
+        <div class="stat"><span class="stat-label">Avg RSSI:</span> <span id="avgrssi">N/A</span></div>
+        <div class="stat"><span class="stat-label">Avg SNR:</span> <span id="avgsnr">N/A</span></div>
+        <div class="stat"><span class="stat-label">Max Speed:</span> <span id="maxspeed">0 km/h</span></div>
+        <div class="stat"><span class="stat-label">Last Update:</span> <span id="lastupdate">-</span></div>
+    </div>
 
-    def init_html_file(self, filepath, server_name):
-        """Initialize self-contained HTML map file with enhanced styling"""
-        html = f'''<!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Range Test - {server_name}</title>
-        <style>
-            body {{
-                margin: 0;
-                padding: 0;
-                font-family: Arial, sans-serif;
-            }}
-            #map {{
-                position: absolute;
-                top: 0;
-                bottom: 140px;
-                width: 100%;
-            }}
-            #info {{
-                position: absolute;
-                bottom: 0;
-                width: 100%;
-                height: 140px;
-                background: rgba(255, 255, 255, 0.95);
-                padding: 15px;
-                box-sizing: border-box;
-                border-top: 3px solid #0078d4;
-                overflow-y: auto;
-            }}
-            .stat {{
-                display: inline-block;
-                margin-right: 20px;
-                margin-bottom: 5px;
-                font-size: 14px;
-            }}
-            .stat-label {{
-                font-weight: bold;
-                color: #0078d4;
-            }}
-            .legend {{
-                background: white;
-                padding: 10px;
-                border-radius: 5px;
-                box-shadow: 0 1px 5px rgba(0,0,0,0.4);
-            }}
-            .legend-item {{
-                margin: 5px 0;
-                font-size: 12px;
-            }}
-            @media (max-width: 600px) {{
-                #info {{
-                    height: 160px;
-                }}
-                .stat {{
-                    display: block;
-                    margin: 3px 0;
-                }}
-            }}
-        </style>
+    <script>
+        var map = L.map('map').setView([45.0, 7.0], 13);
         
-        <!-- Leaflet CSS -->
-        <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 19,
+            attribution: '© OpenStreetMap contributors'
+        }).addTo(map);
         
-        <!-- Leaflet JS -->
-        <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    </head>
-    <body>
-        <div id="map"></div>
-        <div id="info">
-            <div class="stat"><span class="stat-label">Server:</span> <span id="server">{server_name}</span></div>
-            <div class="stat"><span class="stat-label">Started:</span> <span id="start">{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</span></div>
-            <div class="stat"><span class="stat-label">Points:</span> <span id="points">0</span></div>
-            <div class="stat"><span class="stat-label">Distance:</span> <span id="distance">0 km</span></div>
-            <div class="stat"><span class="stat-label">Max Speed:</span> <span id="maxspeed">0 km/h</span></div>
-            <div class="stat"><span class="stat-label">Avg RSSI:</span> <span id="avgrssi">N/A</span></div>
-            <div class="stat"><span class="stat-label">Avg SNR:</span> <span id="avgsnr">N/A</span></div>
-            <div class="stat"><span class="stat-label">Last Update:</span> <span id="lastupdate">-</span></div>
-        </div>
-
-        <script>
-            // Initialize map - default center (will auto-adjust to points)
-            var map = L.map('map').setView([45.0, 7.0], 13);
+        var markers = [];
+        var gpsPoints = [];
+        var polyline = null;
+        var rssiValues = [];
+        var snrValues = [];
+        var maxSpeed = 0;
+        
+        function getSignalColor(rssi) {
+            if (rssi === null || rssi === undefined) return '#0078d4';  // Blue if no RSSI
+            if (rssi >= -60) return '#00ff00';  // Excellent (green)
+            if (rssi >= -70) return '#7fff00';  // Very Good (lime)
+            if (rssi >= -80) return '#ffff00';  // Good (yellow)
+            if (rssi >= -90) return '#ffa500';  // Fair (orange)
+            if (rssi >= -100) return '#ff6600'; // Poor (dark orange)
+            return '#ff0000';                    // Very Poor (red)
+        }
+        
+        function getMarkerSize(rssi) {
+            if (rssi === null || rssi === undefined) return 10;
+            if (rssi >= -60) return 14;
+            if (rssi >= -70) return 12;
+            if (rssi >= -80) return 10;
+            return 8;
+        }
+        
+        function createSignalIcon(rssi, isStart, isEnd) {
+            if (isStart) {
+                return L.divIcon({
+                    className: 'custom-marker',
+                    html: '<div style="background-color: #00ff00; width: 16px; height: 16px; border-radius: 50%; border: 3px solid white; box-shadow: 0 0 6px rgba(0,0,0,0.6);"></div>',
+                    iconSize: [16, 16],
+                    iconAnchor: [8, 8]
+                });
+            }
+            if (isEnd) {
+                return L.divIcon({
+                    className: 'custom-marker',
+                    html: '<div style="background-color: #ff0000; width: 16px; height: 16px; border-radius: 50%; border: 3px solid white; box-shadow: 0 0 6px rgba(0,0,0,0.6);"></div>',
+                    iconSize: [16, 16],
+                    iconAnchor: [8, 8]
+                });
+            }
             
-            // Add OpenStreetMap tiles
-            L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
-                maxZoom: 19,
-                attribution: '© OpenStreetMap contributors'
-            }}).addTo(map);
+            var color = getSignalColor(rssi);
+            var size = getMarkerSize(rssi);
+            return L.divIcon({
+                className: 'custom-marker',
+                html: '<div style="background-color: ' + color + '; width: ' + size + 'px; height: ' + size + 'px; border-radius: 50%; border: 2px solid white; box-shadow: 0 0 4px rgba(0,0,0,0.5);"></div>',
+                iconSize: [size, size],
+                iconAnchor: [size/2, size/2]
+            });
+        }
+        
+        var legend = L.control({position: 'topright'});
+        legend.onAdd = function(map) {
+            var div = L.DomUtil.create('div', 'legend');
+            div.innerHTML = '<div style="font-weight: bold; margin-bottom: 5px;">Range Test</div>' +
+                          '<div class="legend-item">🟢 Start Point</div>' +
+                          '<div class="legend-item">🔴 End Point</div>' +
+                          '<div class="legend-item">━━ Path</div>' +
+                          '<div style="margin-top: 10px; font-weight: bold; font-size: 11px;">Signal Quality (RSSI):</div>' +
+                          '<div class="legend-item" style="font-size: 11px;">🟢 Excellent (≥-60 dBm)</div>' +
+                          '<div class="legend-item" style="font-size: 11px;">🟡 Good (-70 to -80 dBm)</div>' +
+                          '<div class="legend-item" style="font-size: 11px;">🟠 Fair (-80 to -90 dBm)</div>' +
+                          '<div class="legend-item" style="font-size: 11px;">🔴 Poor (≤-90 dBm)</div>' +
+                          '<div class="legend-item" style="font-size: 11px;">🔵 No Signal Data</div>';
+            return div;
+        };
+        legend.addTo(map);
+        
+        function calculateDistance(lat1, lon1, lat2, lon2) {
+            var R = 6371; // Earth radius in km
+            var dLat = (lat2 - lat1) * Math.PI / 180;
+            var dLon = (lon2 - lon1) * Math.PI / 180;
+            var a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+                    Math.sin(dLon/2) * Math.sin(dLon/2);
+            var c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+            return R * c;
+        }
+        
+        function getSignalBar(value, min, max, label) {
+            if (value === null || value === undefined) return '';
+            var percent = Math.max(0, Math.min(100, ((value - min) / (max - min)) * 100));
+            var color = getSignalColor(value);
+            return '<div style="margin: 5px 0;">' +
+                   '<span style="font-size: 11px;">' + label + ': ' + value.toFixed(1) + '</span>' +
+                   '<div style="background: #ddd; width: 100px; height: 6px; display: inline-block; margin-left: 5px; border-radius: 3px; vertical-align: middle;">' +
+                   '<div style="background: ' + color + '; width: ' + percent + '%; height: 100%; border-radius: 3px;"></div>' +
+                   '</div></div>';
+        }
+        
+        function addPoint(lat, lon, index, time, speed, accuracy, altitude, provider, rssi, snr, q) {
+            var point = [lat, lon];
+            gpsPoints.push(point);
             
-            // Initialize layers
-            var polyline = L.polyline([], {{
+            var isStart = (index === 1);
+            var isEnd = false; // Will be set later with markEndPoint()
+            
+            // Track signal stats
+            if (rssi !== null && rssi !== undefined) {
+                rssiValues.push(rssi);
+            }
+            if (snr !== null && snr !== undefined) {
+                snrValues.push(snr);
+            }
+            
+            // Track max speed
+            if (speed > maxSpeed) {
+                maxSpeed = speed;
+            }
+            
+            // Update or create polyline (path)
+            if (polyline) {
+                map.removeLayer(polyline);
+            }
+            polyline = L.polyline(gpsPoints, {
                 color: 'red',
                 weight: 4,
                 opacity: 0.7
-            }}).addTo(map);
+            }).addTo(map);
             
-            var markers = [];
-            var gpsPoints = [];
-            var maxSpeed = 0;
-            var rssiValues = [];
-            var snrValues = [];
+            // Create marker with signal-based coloring
+            var icon = createSignalIcon(rssi, isStart, isEnd);
+            var marker = L.marker(point, {icon: icon}).addTo(map);
             
-            // Function to get signal quality color based on RSSI
-            function getSignalColor(rssi) {{
-                if (rssi === null || rssi === undefined) return '#0078d4';  // Blue if no signal data
-                if (rssi >= -60) return '#00ff00';  // Excellent (green)
-                if (rssi >= -70) return '#7fff00';  // Very Good (lime)
-                if (rssi >= -80) return '#ffff00';  // Good (yellow)
-                if (rssi >= -90) return '#ffa500';  // Fair (orange)
-                if (rssi >= -100) return '#ff6600'; // Poor (dark orange)
-                return '#ff0000';                    // Very Poor (red)
-            }}
+            // Enhanced popup with ALL GPS and signal data
+            var popupContent = '<div style="min-width: 200px;"><b>Point #' + index + '</b><br>' +
+                'Time: ' + time + '<br>' +
+                'Latitude: ' + lat.toFixed(6) + '<br>' +
+                'Longitude: ' + lon.toFixed(6) + '<br>' +
+                'Altitude: ' + altitude.toFixed(1) + ' m<br>' +
+                'Speed: ' + speed.toFixed(1) + ' km/h<br>' +
+                'Accuracy: ±' + accuracy.toFixed(0) + ' m<br>' +
+                'Provider: ' + provider + '<br>';
             
-            // Function to get marker size based on signal quality
-            function getMarkerSize(rssi) {{
-                if (rssi === null || rssi === undefined) return 10;
-                if (rssi >= -60) return 14;
-                if (rssi >= -70) return 12;
-                if (rssi >= -80) return 10;
-                return 8;
-            }}
+            if (rssi !== null && rssi !== undefined) {
+                popupContent += getSignalBar(rssi, -110, -50, 'RSSI') + '<br>';
+            }
+            if (snr !== null && snr !== undefined) {
+                popupContent += getSignalBar(snr, -10, 20, 'SNR') + '<br>';
+            }
+            if (q !== null && q !== undefined) {
+                popupContent += 'Link Quality: ' + q.toFixed(1) + '%<br>';
+            }
             
-            // Create custom marker with signal color
-            function createSignalIcon(rssi, isStart, isEnd) {{
-                if (isStart) {{
-                    return L.divIcon({{
-                        className: 'custom-marker',
-                        html: '<div style="background-color: #00ff00; width: 16px; height: 16px; border-radius: 50%; border: 3px solid white; box-shadow: 0 0 6px rgba(0,0,0,0.6);"></div>',
-                        iconSize: [16, 16],
-                        iconAnchor: [8, 8]
-                    }});
-                }}
-                if (isEnd) {{
-                    return L.divIcon({{
-                        className: 'custom-marker',
-                        html: '<div style="background-color: #ff0000; width: 16px; height: 16px; border-radius: 50%; border: 3px solid white; box-shadow: 0 0 6px rgba(0,0,0,0.6);"></div>',
-                        iconSize: [16, 16],
-                        iconAnchor: [8, 8]
-                    }});
-                }}
-                
-                var color = getSignalColor(rssi);
-                var size = getMarkerSize(rssi);
-                return L.divIcon({{
-                    className: 'custom-marker',
-                    html: '<div style="background-color: ' + color + '; width: ' + size + 'px; height: ' + size + 'px; border-radius: 50%; border: 2px solid white; box-shadow: 0 0 4px rgba(0,0,0,0.5);"></div>',
-                    iconSize: [size, size],
-                    iconAnchor: [size/2, size/2]
-                }});
-            }}
+            popupContent += '</div>';
             
-            // Enhanced legend with signal quality
-            var legend = L.control({{position: 'topright'}});
-            legend.onAdd = function(map) {{
-                var div = L.DomUtil.create('div', 'legend');
-                div.innerHTML = '<div style="font-weight: bold; margin-bottom: 5px;">Range Test</div>' +
-                            '<div class="legend-item">🟢 Start Point</div>' +
-                            '<div class="legend-item">🔴 End Point</div>' +
-                            '<div class="legend-item">━━ Path</div>' +
-                            '<div style="margin-top: 10px; font-weight: bold; font-size: 11px;">Signal Quality (RSSI):</div>' +
-                            '<div class="legend-item" style="font-size: 11px;">🟢 Excellent (≥-60 dBm)</div>' +
-                            '<div class="legend-item" style="font-size: 11px;">🟡 Good (-70 to -80 dBm)</div>' +
-                            '<div class="legend-item" style="font-size: 11px;">🟠 Fair (-80 to -90 dBm)</div>' +
-                            '<div class="legend-item" style="font-size: 11px;">🔴 Poor (≤-90 dBm)</div>' +
-                            '<div class="legend-item" style="font-size: 11px;">🔵 No Signal Data</div>';
-                return div;
-            }};
-            legend.addTo(map);
+            marker.bindPopup(popupContent);
+            markers.push(marker);
             
-            // Haversine distance calculation
-            function calculateDistance(lat1, lon1, lat2, lon2) {{
-                var R = 6371; // Earth radius in km
-                var dLat = (lat2 - lat1) * Math.PI / 180;
-                var dLon = (lon2 - lon1) * Math.PI / 180;
-                var a = Math.sin(dLat/2) * Math.sin(dLat/2) +
-                        Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
-                        Math.sin(dLon/2) * Math.sin(dLon/2);
-                var c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-                return R * c;
-            }}
+            // Calculate total distance
+            var totalDist = 0;
+            for (var i = 1; i < gpsPoints.length; i++) {
+                totalDist += calculateDistance(
+                    gpsPoints[i-1][0], gpsPoints[i-1][1],
+                    gpsPoints[i][0], gpsPoints[i][1]
+                );
+            }
             
-            // Function to get signal bar HTML
-            function getSignalBar(value, min, max, label) {{
-                if (value === null || value === undefined) return '';
-                var percent = Math.max(0, Math.min(100, ((value - min) / (max - min)) * 100));
-                var color = getSignalColor(value);
-                return '<div style="margin: 5px 0;">' +
-                    '<span style="font-size: 11px;">' + label + ': ' + value.toFixed(1) + '</span>' +
-                    '<div style="background: #ddd; width: 100px; height: 6px; display: inline-block; margin-left: 5px; border-radius: 3px; vertical-align: middle;">' +
-                    '<div style="background: ' + color + '; width: ' + percent + '%; height: 100%; border-radius: 3px;"></div>' +
-                    '</div></div>';
-            }}
+            // Calculate average RSSI and SNR
+            var avgRssi = rssiValues.length > 0 ? 
+                rssiValues.reduce((a, b) => a + b, 0) / rssiValues.length : null;
+            var avgSnr = snrValues.length > 0 ? 
+                snrValues.reduce((a, b) => a + b, 0) / snrValues.length : null;
             
-            // Add point function with enhanced signal data
-            function addPoint(lat, lon, index, time, speed, accuracy, altitude, provider, rssi, snr, q) {{
-                var point = [lat, lon];
-                gpsPoints.push(point);
-                
-                // Track signal stats
-                if (rssi !== null && rssi !== undefined) {{
-                    rssiValues.push(rssi);
-                }}
-                if (snr !== null && snr !== undefined) {{
-                    snrValues.push(snr);
-                }}
-                
-                // Update polyline
-                polyline.setLatLngs(gpsPoints);
-                
-                // Track max speed
-                if (speed > maxSpeed) {{
-                    maxSpeed = speed;
-                }}
-                
-                // Create marker with signal-based coloring
-                var isStart = (index === 1);
-                var isEnd = false; // Will be set later
-                var icon = createSignalIcon(rssi, isStart, isEnd);
-                var marker = L.marker(point, {{icon: icon}}).addTo(map);
-                
-                // Enhanced popup with ALL GPS and signal data
-                var popupContent = '<div style="min-width: 200px;"><b>Ping #' + index + '</b><br>' +
-                    'Time: ' + time + '<br>' +
-                    'Latitude: ' + lat.toFixed(6) + '<br>' +
-                    'Longitude: ' + lon.toFixed(6) + '<br>' +
-                    'Altitude: ' + altitude.toFixed(1) + ' m<br>' +
-                    'Speed: ' + speed.toFixed(1) + ' km/h<br>' +
-                    'Accuracy: ±' + accuracy.toFixed(0) + ' m<br>' +
-                    'Provider: ' + provider + '<br>';
-                
-                if (rssi !== null && rssi !== undefined) {{
-                    popupContent += getSignalBar(rssi, -110, -50, 'RSSI') + '<br>';
-                }}
-                if (snr !== null && snr !== undefined) {{
-                    popupContent += getSignalBar(snr, -10, 20, 'SNR') + '<br>';
-                }}
-                if (q !== null && q !== undefined) {{
-                    popupContent += 'Link Quality: ' + q.toFixed(1) + '%<br>';
-                }}
-                
-                popupContent += '</div>';
-                
-                marker.bindPopup(popupContent);
-                markers.push(marker);
-                
-                // Calculate total distance
-                var totalDist = 0;
-                for (var i = 1; i < gpsPoints.length; i++) {{
-                    totalDist += calculateDistance(
-                        gpsPoints[i-1][0], gpsPoints[i-1][1],
-                        gpsPoints[i][0], gpsPoints[i][1]
-                    );
-                }}
-                
-                // Calculate average RSSI and SNR
-                var avgRssi = rssiValues.length > 0 ? 
-                    rssiValues.reduce((a, b) => a + b, 0) / rssiValues.length : null;
-                var avgSnr = snrValues.length > 0 ? 
-                    snrValues.reduce((a, b) => a + b, 0) / snrValues.length : null;
-                
-                // Update stats
-                document.getElementById('points').textContent = gpsPoints.length;
-                document.getElementById('distance').textContent = totalDist.toFixed(2) + ' km';
-                document.getElementById('maxspeed').textContent = maxSpeed.toFixed(1) + ' km/h';
-                document.getElementById('avgrssi').textContent = avgRssi !== null ? avgRssi.toFixed(1) + ' dBm' : 'N/A';
-                document.getElementById('avgsnr').textContent = avgSnr !== null ? avgSnr.toFixed(1) + ' dB' : 'N/A';
-                document.getElementById('lastupdate').textContent = time;
-                
-                // Fit map to show all points with padding
-                if (gpsPoints.length > 0) {{
-                    map.fitBounds(polyline.getBounds(), {{padding: [50, 50]}});
-                }}
-            }}
+            // Update stats
+            document.getElementById('points').textContent = gpsPoints.length;
+            document.getElementById('distance').textContent = totalDist.toFixed(2) + ' km';
+            document.getElementById('maxspeed').textContent = maxSpeed.toFixed(1) + ' km/h';
+            document.getElementById('avgrssi').textContent = avgRssi !== null ? avgRssi.toFixed(1) + ' dBm' : 'N/A';
+            document.getElementById('avgsnr').textContent = avgSnr !== null ? avgSnr.toFixed(1) + ' dB' : 'N/A';
+            document.getElementById('lastupdate').textContent = time;
             
-            // Mark end point
-            function markEndPoint() {{
-                if (markers.length > 0) {{
-                    // Remove last marker and replace with end icon
-                    map.removeLayer(markers[markers.length - 1]);
-                    var lastPoint = gpsPoints[gpsPoints.length - 1];
-                    var endMarker = L.marker(lastPoint, {{icon: createSignalIcon(null, false, true)}}).addTo(map);
-                    endMarker.bindPopup('<b>END</b><br>Final Position<br>Total Points: ' + gpsPoints.length);
-                    markers[markers.length - 1] = endMarker;
-                }}
-            }}
-            
-            // GPS POINTS DATA WILL BE INSERTED HERE
-            // POINTS_START
-    '''
+            // Fit map to show all points with padding
+            if (gpsPoints.length > 0) {
+                map.fitBounds(polyline.getBounds(), {padding: [50, 50]});
+            }
+        }
         
-        with open(filepath, 'w') as f:
+        function markEndPoint() {
+            if (markers.length > 0) {
+                // Remove last marker and replace with end icon
+                map.removeLayer(markers[markers.length - 1]);
+                var lastPoint = gpsPoints[gpsPoints.length - 1];
+                var endMarker = L.marker(lastPoint, {icon: createSignalIcon(null, false, true)}).addTo(map);
+                endMarker.bindPopup('<b>END</b><br>Final Position<br>Total Points: ' + gpsPoints.length);
+                markers[markers.length - 1] = endMarker;
+            }
+        }
+        
+        // POINTS DATA WILL BE INSERTED HERE
+        // POINTS_START
+    </script>
+</body>
+</html>'''
+        
+        with open(self.html_file, 'w') as f:
             f.write(html)
-
-    def append_to_html(self, html_path, gps_point, is_first, is_last):
-        """Append GPS point to HTML file"""
-        try:
-            # Extract all data from gps_point
-            lat = gps_point['lat']
-            lon = gps_point['lon']
-            index = gps_point['index']
-            time = gps_point['time']
-            speed = gps_point['speed']
-            accuracy = gps_point['accuracy']
-            altitude = gps_point['altitude']
-            provider = gps_point['provider']
-            rssi = gps_point.get('rssi')
-            snr = gps_point.get('snr')
-            q = gps_point.get('q')
-            
-            # Format None values as null for JavaScript
-            rssi_str = str(rssi) if rssi is not None else 'null'
-            snr_str = str(snr) if snr is not None else 'null'
-            q_str = str(q) if q is not None else 'null'
-            
-            # Create JavaScript line with ALL parameters
-            js_line = f"        addPoint({lat}, {lon}, {index}, '{time}', {speed:.1f}, {accuracy:.0f}, {altitude:.1f}, '{provider}', {rssi_str}, {snr_str}, {q_str});\n"
-            
-            # Read file
-            with open(html_path, 'r') as f:
-                content = f.read()
-            
-            # Insert point before POINTS_START marker
-            if '// POINTS_START' in content:
-                content = content.replace('// POINTS_START', js_line + '// POINTS_START')
-            
-            # Write back
-            with open(html_path, 'w') as f:
-                f.write(content)
-            
-            # If last point, finalize
-            if is_last:
-                self.finalize_html(html_path)
-        
-        except Exception as e:
-            print(f"[HTML] ⚠️ Error: {e}")        
     
     def on_message(self, message, msg_data):
         """Handle incoming RangeTest messages"""
@@ -594,6 +512,14 @@ class Plugin:
             altitude = gps_data.get('altitude', 0)
             provider = gps_data.get('provider', 'unknown')
             
+            # Get current point index
+            try:
+                with open(self.json_file, 'r') as f:
+                    data = json.load(f)
+                    point_index = len(data['points']) + 1
+            except:
+                point_index = 1
+            
             # Save to JSON
             self.append_to_json(timestamp_str, date_str, time_str, lat, lon, 
                               accuracy, speed, altitude, provider, rssi, snr, q)
@@ -611,8 +537,8 @@ class Plugin:
                                   accuracy, speed, altitude, provider, rssi, snr, q)
             
             # Save to HTML
-            self.append_to_html(date_str, time_str, lat, lon, accuracy, 
-                              provider, rssi, snr, q)
+            self.append_to_html(point_index, date_str, time_str, lat, lon, 
+                              accuracy, speed, altitude, provider, rssi, snr, q)
         
         except Exception as e:
             print(f"[Range Client] ⚠️ Save error: {e}")
@@ -737,6 +663,29 @@ class Plugin:
         except Exception as e:
             print(f"[GeoJSON] ⚠️ Error: {e}")
     
+    def append_to_html(self, index, date, time, lat, lon, accuracy, speed, altitude, provider, rssi, snr, q):
+        """Append point to HTML file"""
+        try:
+            # Format None values as null for JavaScript
+            rssi_str = str(rssi) if rssi is not None else 'null'
+            snr_str = str(snr) if snr is not None else 'null'
+            q_str = str(q) if q is not None else 'null'
+            
+            # Create JavaScript line with ALL parameters
+            js_line = f"        addPoint({lat}, {lon}, {index}, '{time}', {speed:.1f}, {accuracy:.0f}, {altitude:.1f}, '{provider}', {rssi_str}, {snr_str}, {q_str});\n"
+            
+            with open(self.html_file, 'r') as f:
+                content = f.read()
+            
+            # Insert point before POINTS_START marker
+            if '// POINTS_START' in content:
+                content = content.replace('// POINTS_START', js_line + '// POINTS_START')
+            
+            with open(self.html_file, 'w') as f:
+                f.write(content)
+        
+        except Exception as e:
+            print(f"[HTML] ⚠️ Error: {e}")
     
     def notify_saved(self):
         """Notify user that point was saved"""
@@ -842,47 +791,35 @@ class Plugin:
             
             elif cmd in ['rangeexport', 'rex']:
                 self.export_files()
-                        
+            
             elif cmd == 'rangeclear':
                 # Clear all range test files immediately
-                log_dir = os.path.join(self.client.storage_path, "rangetest_logs")
+                print(f"\n🗑️ Clearing range test files...")
                 
-                if not os.path.exists(log_dir):
-                    print("\n✅ No logs directory found - nothing to clear\n")
-                    return
+                files_to_delete = [
+                    self.json_file,
+                    self.kml_file,
+                    self.csv_file,
+                    self.geojson_file,
+                    self.html_file
+                ]
                 
-                try:
-                    # Count files before deletion
-                    files = [f for f in os.listdir(log_dir) if f.startswith('rangetest_')]
-                    file_count = len(files)
-                    
-                    if file_count == 0:
-                        print("\n✅ No range test files found - nothing to clear\n")
-                        return
-                    
-                    print(f"\n🗑️ Clearing {file_count} range test files...")
-                    
-                    # Delete all rangetest files
-                    for filename in files:
-                        filepath = os.path.join(log_dir, filename)
+                deleted = 0
+                for filepath in files_to_delete:
+                    if os.path.exists(filepath):
                         try:
                             os.remove(filepath)
+                            deleted += 1
                         except Exception as e:
-                            print(f"⚠️ Could not delete {filename}: {e}")
-                    
-                    # Try to remove the directory if empty
-                    try:
-                        if not os.listdir(log_dir):
-                            os.rmdir(log_dir)
-                            print(f"✅ Cleared all files and removed logs directory\n")
-                        else:
-                            print(f"✅ Cleared {file_count} range test files\n")
-                    except:
-                        print(f"✅ Cleared {file_count} range test files\n")
+                            print(f"⚠️ Could not delete {os.path.basename(filepath)}: {e}")
                 
-                except Exception as e:
-                    print(f"\n❌ Error clearing files: {e}\n")
-
+                if deleted > 0:
+                    # Re-initialize files
+                    self.init_files()
+                    print(f"✅ Cleared {deleted} files and reset\n")
+                else:
+                    print(f"✅ No files to clear\n")
+            
             elif cmd == 'rangestatus':
                 print(f"\n📍 GPS STATUS")
                 print("─"*60)
