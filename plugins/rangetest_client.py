@@ -90,237 +90,276 @@ class Plugin:
         
         with open(self.kml_file, 'w') as f:
             f.write(kml_header + kml_footer)
-    
+        
     def init_html(self):
-        """Initialize HTML map file with path and heatmap"""
+        """Initialize HTML map file with path and signal-based coloring"""
         html = '''<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Range Test Coverage Map</title>
-    <style>
-        body { margin: 0; padding: 0; font-family: Arial, sans-serif; }
-        #map { position: absolute; top: 0; bottom: 140px; width: 100%; }
-        #info {
-            position: absolute; bottom: 0; width: 100%; height: 140px;
-            background: rgba(255, 255, 255, 0.95); padding: 15px;
-            box-sizing: border-box; border-top: 3px solid #0078d4;
-            overflow-y: auto;
-        }
-        .stat { display: inline-block; margin-right: 20px; margin-bottom: 5px; font-size: 14px; }
-        .stat-label { font-weight: bold; color: #0078d4; }
-        .legend {
-            background: white;
-            padding: 10px;
-            border-radius: 5px;
-            box-shadow: 0 1px 5px rgba(0,0,0,0.4);
-        }
-        .legend-item {
-            margin: 5px 0;
-            font-size: 12px;
-        }
-        @media (max-width: 600px) {
-            #info { height: 160px; }
-            .stat { display: block; margin: 3px 0; }
-        }
-    </style>
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-</head>
-<body>
-    <div id="map"></div>
-    <div id="info">
-        <div class="stat"><span class="stat-label">Total Points:</span> <span id="points">0</span></div>
-        <div class="stat"><span class="stat-label">Distance:</span> <span id="distance">0 km</span></div>
-        <div class="stat"><span class="stat-label">Avg RSSI:</span> <span id="avgrssi">N/A</span></div>
-        <div class="stat"><span class="stat-label">Avg SNR:</span> <span id="avgsnr">N/A</span></div>
-        <div class="stat"><span class="stat-label">Last Update:</span> <span id="lastupdate">-</span></div>
-    </div>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Range Test Coverage Map</title>
+        <style>
+            body { margin: 0; padding: 0; font-family: Arial, sans-serif; }
+            #map { position: absolute; top: 0; bottom: 140px; width: 100%; }
+            #info {
+                position: absolute; bottom: 0; width: 100%; height: 140px;
+                background: rgba(255, 255, 255, 0.95); padding: 15px;
+                box-sizing: border-box; border-top: 3px solid #0078d4;
+                overflow-y: auto;
+            }
+            .stat { display: inline-block; margin-right: 20px; margin-bottom: 5px; font-size: 14px; }
+            .stat-label { font-weight: bold; color: #0078d4; }
+            .legend {
+                background: white;
+                padding: 10px;
+                border-radius: 5px;
+                box-shadow: 0 1px 5px rgba(0,0,0,0.4);
+            }
+            .legend-item {
+                margin: 5px 0;
+                font-size: 12px;
+            }
+            @media (max-width: 600px) {
+                #info { height: 160px; }
+                .stat { display: block; margin: 3px 0; }
+            }
+        </style>
+        <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+        <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    </head>
+    <body>
+        <div id="map"></div>
+        <div id="info">
+            <div class="stat"><span class="stat-label">Total Points:</span> <span id="points">0</span></div>
+            <div class="stat"><span class="stat-label">Distance:</span> <span id="distance">0 km</span></div>
+            <div class="stat"><span class="stat-label">Avg RSSI:</span> <span id="avgrssi">N/A</span></div>
+            <div class="stat"><span class="stat-label">Avg SNR:</span> <span id="avgsnr">N/A</span></div>
+            <div class="stat"><span class="stat-label">Last Update:</span> <span id="lastupdate">-</span></div>
+        </div>
 
-    <script>
-        var map = L.map('map').setView([45.0, 7.0], 13);
-        
-        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-            maxZoom: 19,
-            attribution: '© OpenStreetMap contributors'
-        }).addTo(map);
-        
-        var markers = [];
-        var points = [];
-        var polyline = null;
-        var rssiValues = [];
-        var snrValues = [];
-        
-        function getSignalColor(rssi) {
-            if (rssi === null || rssi === undefined) return '#999999';
-            if (rssi >= -60) return '#00ff00';  // Excellent
-            if (rssi >= -70) return '#7fff00';  // Very Good
-            if (rssi >= -80) return '#ffff00';  // Good
-            if (rssi >= -90) return '#ffa500';  // Fair
-            if (rssi >= -100) return '#ff6600'; // Poor
-            return '#ff0000';                    // Very Poor
-        }
-        
-        function getMarkerSize(rssi) {
-            if (rssi === null || rssi === undefined) return 8;
-            if (rssi >= -60) return 12;
-            if (rssi >= -70) return 10;
-            if (rssi >= -80) return 8;
-            return 6;
-        }
-        
-        function createSignalIcon(rssi, isFirst, isLast) {
-            if (isFirst) {
-                return L.divIcon({
-                    className: 'custom-marker',
-                    html: '<div style="background-color: #00ff00; width: 14px; height: 14px; border-radius: 50%; border: 3px solid white; box-shadow: 0 0 6px rgba(0,0,0,0.6);"></div>',
-                    iconSize: [14, 14],
-                    iconAnchor: [7, 7]
-                });
-            }
-            if (isLast) {
-                return L.divIcon({
-                    className: 'custom-marker',
-                    html: '<div style="background-color: #ff0000; width: 14px; height: 14px; border-radius: 50%; border: 3px solid white; box-shadow: 0 0 6px rgba(0,0,0,0.6);"></div>',
-                    iconSize: [14, 14],
-                    iconAnchor: [7, 7]
-                });
-            }
+        <script>
+            var map = L.map('map').setView([45.0, 7.0], 13);
             
-            var color = getSignalColor(rssi);
-            var size = getMarkerSize(rssi);
-            return L.divIcon({
-                className: 'custom-marker',
-                html: '<div style="background-color: ' + color + '; width: ' + size + 'px; height: ' + size + 'px; border-radius: 50%; border: 2px solid white; box-shadow: 0 0 4px rgba(0,0,0,0.5);"></div>',
-                iconSize: [size, size],
-                iconAnchor: [size/2, size/2]
-            });
-        }
-        
-        var legend = L.control({position: 'topright'});
-        legend.onAdd = function(map) {
-            var div = L.DomUtil.create('div', 'legend');
-            div.innerHTML = '<div style="font-weight: bold; margin-bottom: 5px;">Range Test Coverage</div>' +
-                          '<div class="legend-item">🟢 Start Point</div>' +
-                          '<div class="legend-item">🔴 End Point</div>' +
-                          '<div class="legend-item">━━ Path</div>' +
-                          '<div style="margin-top: 10px; font-weight: bold; font-size: 11px;">Signal Quality (RSSI):</div>' +
-                          '<div class="legend-item" style="font-size: 11px;">🟢 Excellent (≥-60 dBm)</div>' +
-                          '<div class="legend-item" style="font-size: 11px;">🟡 Good (-70 to -80 dBm)</div>' +
-                          '<div class="legend-item" style="font-size: 11px;">🟠 Fair (-80 to -90 dBm)</div>' +
-                          '<div class="legend-item" style="font-size: 11px;">🔴 Poor (≤-90 dBm)</div>';
-            return div;
-        };
-        legend.addTo(map);
-        
-        function calculateDistance(lat1, lon1, lat2, lon2) {
-            var R = 6371;
-            var dLat = (lat2 - lat1) * Math.PI / 180;
-            var dLon = (lon2 - lon1) * Math.PI / 180;
-            var a = Math.sin(dLat/2) * Math.sin(dLat/2) +
-                    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
-                    Math.sin(dLon/2) * Math.sin(dLon/2);
-            var c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-            return R * c;
-        }
-        
-        function addPoint(lat, lon, date, time, accuracy, rssi, snr, q, provider) {
-            var isFirst = (points.length === 0);
-            var isLast = false;
-            
-            points.push([lat, lon]);
-            
-            // Track signal stats
-            if (rssi !== null && rssi !== undefined) {
-                rssiValues.push(rssi);
-            }
-            if (snr !== null && snr !== undefined) {
-                snrValues.push(snr);
-            }
-            
-            // Update or create polyline
-            if (polyline) {
-                map.removeLayer(polyline);
-            }
-            polyline = L.polyline(points, {
-                color: 'red',
-                weight: 4,
-                opacity: 0.7
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                maxZoom: 19,
+                attribution: '© OpenStreetMap contributors'
             }).addTo(map);
             
-            // Create marker
-            var icon = createSignalIcon(rssi, isFirst, isLast);
-            var marker = L.marker([lat, lon], {icon: icon}).addTo(map);
+            var markers = [];
+            var gpsPoints = [];
+            var polyline = null;
+            var rssiValues = [];
+            var snrValues = [];
+            var pointIndex = 0;
             
-            // Enhanced popup
-            var popup = '<div style="min-width: 180px;"><b>' + date + ' ' + time + '</b><br>' +
-                       'Lat: ' + lat.toFixed(6) + '<br>' +
-                       'Lon: ' + lon.toFixed(6) + '<br>' +
-                       'Accuracy: ±' + accuracy + 'm<br>' +
-                       'Provider: ' + provider + '<br>';
-            
-            if (rssi !== null && rssi !== undefined) {
-                popup += 'RSSI: ' + rssi.toFixed(1) + ' dBm<br>';
-            }
-            if (snr !== null && snr !== undefined) {
-                popup += 'SNR: ' + snr.toFixed(1) + ' dB<br>';
-            }
-            if (q !== null && q !== undefined) {
-                popup += 'Quality: ' + q.toFixed(1) + '%<br>';
+            function getSignalColor(rssi) {
+                if (rssi === null || rssi === undefined) return '#0078d4';  // Blue if no RSSI
+                if (rssi >= -60) return '#00ff00';  // Excellent (green)
+                if (rssi >= -70) return '#7fff00';  // Very Good (lime)
+                if (rssi >= -80) return '#ffff00';  // Good (yellow)
+                if (rssi >= -90) return '#ffa500';  // Fair (orange)
+                if (rssi >= -100) return '#ff6600'; // Poor (dark orange)
+                return '#ff0000';                    // Very Poor (red)
             }
             
-            popup += '</div>';
-            
-            marker.bindPopup(popup);
-            markers.push(marker);
-            
-            // Calculate total distance
-            var totalDist = 0;
-            for (var i = 1; i < points.length; i++) {
-                totalDist += calculateDistance(
-                    points[i-1][0], points[i-1][1],
-                    points[i][0], points[i][1]
-                );
+            function getMarkerSize(rssi) {
+                if (rssi === null || rssi === undefined) return 10;
+                if (rssi >= -60) return 14;
+                if (rssi >= -70) return 12;
+                if (rssi >= -80) return 10;
+                return 8;
             }
             
-            // Calculate averages
-            var avgRssi = rssiValues.length > 0 ? 
-                rssiValues.reduce((a, b) => a + b, 0) / rssiValues.length : null;
-            var avgSnr = snrValues.length > 0 ? 
-                snrValues.reduce((a, b) => a + b, 0) / snrValues.length : null;
-            
-            // Update stats
-            document.getElementById('points').textContent = points.length;
-            document.getElementById('distance').textContent = totalDist.toFixed(2) + ' km';
-            document.getElementById('avgrssi').textContent = avgRssi !== null ? avgRssi.toFixed(1) + ' dBm' : 'N/A';
-            document.getElementById('avgsnr').textContent = avgSnr !== null ? avgSnr.toFixed(1) + ' dB' : 'N/A';
-            document.getElementById('lastupdate').textContent = date + ' ' + time;
-            
-            // Fit bounds
-            if (points.length > 0) {
-                map.fitBounds(polyline.getBounds(), {padding: [50, 50]});
+            function createSignalIcon(rssi, isStart, isEnd) {
+                if (isStart) {
+                    return L.divIcon({
+                        className: 'custom-marker',
+                        html: '<div style="background-color: #00ff00; width: 16px; height: 16px; border-radius: 50%; border: 3px solid white; box-shadow: 0 0 6px rgba(0,0,0,0.6);"></div>',
+                        iconSize: [16, 16],
+                        iconAnchor: [8, 8]
+                    });
+                }
+                if (isEnd) {
+                    return L.divIcon({
+                        className: 'custom-marker',
+                        html: '<div style="background-color: #ff0000; width: 16px; height: 16px; border-radius: 50%; border: 3px solid white; box-shadow: 0 0 6px rgba(0,0,0,0.6);"></div>',
+                        iconSize: [16, 16],
+                        iconAnchor: [8, 8]
+                    });
+                }
+                
+                var color = getSignalColor(rssi);
+                var size = getMarkerSize(rssi);
+                return L.divIcon({
+                    className: 'custom-marker',
+                    html: '<div style="background-color: ' + color + '; width: ' + size + 'px; height: ' + size + 'px; border-radius: 50%; border: 2px solid white; box-shadow: 0 0 4px rgba(0,0,0,0.5);"></div>',
+                    iconSize: [size, size],
+                    iconAnchor: [size/2, size/2]
+                });
             }
-        }
-        
-        function markEndPoint() {
-            if (markers.length > 0) {
-                map.removeLayer(markers[markers.length - 1]);
-                var lastPoint = points[points.length - 1];
-                var endMarker = L.marker(lastPoint, {icon: createSignalIcon(null, false, true)}).addTo(map);
-                endMarker.bindPopup('<b>END</b><br>Final Position<br>Total Points: ' + points.length);
-                markers[markers.length - 1] = endMarker;
+            
+            var legend = L.control({position: 'topright'});
+            legend.onAdd = function(map) {
+                var div = L.DomUtil.create('div', 'legend');
+                div.innerHTML = '<div style="font-weight: bold; margin-bottom: 5px;">Range Test</div>' +
+                            '<div class="legend-item">🟢 Start Point</div>' +
+                            '<div class="legend-item">🔴 End Point</div>' +
+                            '<div class="legend-item">━━ Path</div>' +
+                            '<div style="margin-top: 10px; font-weight: bold; font-size: 11px;">Signal Quality (RSSI):</div>' +
+                            '<div class="legend-item" style="font-size: 11px;">🟢 Excellent (≥-60 dBm)</div>' +
+                            '<div class="legend-item" style="font-size: 11px;">🟡 Good (-70 to -80 dBm)</div>' +
+                            '<div class="legend-item" style="font-size: 11px;">🟠 Fair (-80 to -90 dBm)</div>' +
+                            '<div class="legend-item" style="font-size: 11px;">🔴 Poor (≤-90 dBm)</div>' +
+                            '<div class="legend-item" style="font-size: 11px;">🔵 No Signal Data</div>';
+                return div;
+            };
+            legend.addTo(map);
+            
+            function calculateDistance(lat1, lon1, lat2, lon2) {
+                var R = 6371; // Earth radius in km
+                var dLat = (lat2 - lat1) * Math.PI / 180;
+                var dLon = (lon2 - lon1) * Math.PI / 180;
+                var a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                        Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+                        Math.sin(dLon/2) * Math.sin(dLon/2);
+                var c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+                return R * c;
             }
-        }
-        
-        // POINTS DATA WILL BE INSERTED HERE
-        // POINTS_START
-    </script>
-</body>
-</html>'''
+            
+            function getSignalBar(value, min, max, label) {
+                if (value === null || value === undefined) return '';
+                var percent = Math.max(0, Math.min(100, ((value - min) / (max - min)) * 100));
+                var color = getSignalColor(value);
+                return '<div style="margin: 5px 0;">' +
+                    '<span style="font-size: 11px;">' + label + ': ' + value.toFixed(1) + '</span>' +
+                    '<div style="background: #ddd; width: 100px; height: 6px; display: inline-block; margin-left: 5px; border-radius: 3px; vertical-align: middle;">' +
+                    '<div style="background: ' + color + '; width: ' + percent + '%; height: 100%; border-radius: 3px;"></div>' +
+                    '</div></div>';
+            }
+            
+            function addPoint(lat, lon, date, time, accuracy, rssi, snr, q, provider) {
+                pointIndex++;
+                var point = [lat, lon];
+                gpsPoints.push(point);
+                
+                var isStart = (pointIndex === 1);
+                var isEnd = false; // Will be set later with markEndPoint()
+                
+                // Track signal stats
+                if (rssi !== null && rssi !== undefined) {
+                    rssiValues.push(rssi);
+                }
+                if (snr !== null && snr !== undefined) {
+                    snrValues.push(snr);
+                }
+                
+                // Update or create polyline (path)
+                if (polyline) {
+                    map.removeLayer(polyline);
+                }
+                polyline = L.polyline(gpsPoints, {
+                    color: 'red',
+                    weight: 4,
+                    opacity: 0.7
+                }).addTo(map);
+                
+                // Create marker with signal-based coloring
+                var icon = createSignalIcon(rssi, isStart, isEnd);
+                var marker = L.marker(point, {icon: icon}).addTo(map);
+                
+                // Enhanced popup with signal data
+                var popupContent = '<div style="min-width: 200px;"><b>Point #' + pointIndex + '</b><br>' +
+                    'Time: ' + date + ' ' + time + '<br>' +
+                    'Lat: ' + lat.toFixed(6) + '<br>' +
+                    'Lon: ' + lon.toFixed(6) + '<br>' +
+                    'Accuracy: ±' + accuracy.toFixed(0) + 'm<br>' +
+                    'Provider: ' + provider + '<br>';
+                
+                if (rssi !== null && rssi !== undefined) {
+                    popupContent += getSignalBar(rssi, -110, -50, 'RSSI') + '<br>';
+                }
+                if (snr !== null && snr !== undefined) {
+                    popupContent += getSignalBar(snr, -10, 20, 'SNR') + '<br>';
+                }
+                if (q !== null && q !== undefined) {
+                    popupContent += 'Link Quality: ' + q.toFixed(1) + '%<br>';
+                }
+                
+                popupContent += '</div>';
+                
+                marker.bindPopup(popupContent);
+                markers.push(marker);
+                
+                // Calculate total distance
+                var totalDist = 0;
+                for (var i = 1; i < gpsPoints.length; i++) {
+                    totalDist += calculateDistance(
+                        gpsPoints[i-1][0], gpsPoints[i-1][1],
+                        gpsPoints[i][0], gpsPoints[i][1]
+                    );
+                }
+                
+                // Calculate average RSSI and SNR
+                var avgRssi = rssiValues.length > 0 ? 
+                    rssiValues.reduce((a, b) => a + b, 0) / rssiValues.length : null;
+                var avgSnr = snrValues.length > 0 ? 
+                    snrValues.reduce((a, b) => a + b, 0) / snrValues.length : null;
+                
+                // Update stats
+                document.getElementById('points').textContent = gpsPoints.length;
+                document.getElementById('distance').textContent = totalDist.toFixed(2) + ' km';
+                document.getElementById('avgrssi').textContent = avgRssi !== null ? avgRssi.toFixed(1) + ' dBm' : 'N/A';
+                document.getElementById('avgsnr').textContent = avgSnr !== null ? avgSnr.toFixed(1) + ' dB' : 'N/A';
+                document.getElementById('lastupdate').textContent = date + ' ' + time;
+                
+                // Fit map to show all points with padding
+                if (gpsPoints.length > 0) {
+                    map.fitBounds(polyline.getBounds(), {padding: [50, 50]});
+                }
+            }
+            
+            function markEndPoint() {
+                if (markers.length > 0) {
+                    // Remove last marker and replace with end icon
+                    map.removeLayer(markers[markers.length - 1]);
+                    var lastPoint = gpsPoints[gpsPoints.length - 1];
+                    var endMarker = L.marker(lastPoint, {icon: createSignalIcon(null, false, true)}).addTo(map);
+                    endMarker.bindPopup('<b>END</b><br>Final Position<br>Total Points: ' + gpsPoints.length);
+                    markers[markers.length - 1] = endMarker;
+                }
+            }
+            
+            // POINTS DATA WILL BE INSERTED HERE
+            // POINTS_START
+        </script>
+    </body>
+    </html>'''
         
         with open(self.html_file, 'w') as f:
             f.write(html)
+
+    def append_to_html(self, date, time, lat, lon, accuracy, provider, rssi, snr, q):
+        """Append point to HTML file"""
+        try:
+            # Format None values as null for JavaScript
+            rssi_str = str(rssi) if rssi is not None else 'null'
+            snr_str = str(snr) if snr is not None else 'null'
+            q_str = str(q) if q is not None else 'null'
+            
+            js_line = f"        addPoint({lat}, {lon}, '{date}', '{time}', {accuracy}, {rssi_str}, {snr_str}, {q_str}, '{provider}');\n"
+            
+            with open(self.html_file, 'r') as f:
+                content = f.read()
+            
+            if '// POINTS_START' in content:
+                content = content.replace('// POINTS_START', js_line + '// POINTS_START')
+            
+            with open(self.html_file, 'w') as f:
+                f.write(content)
+        
+        except Exception as e:
+            print(f"[HTML] ⚠️ Error: {e}")
     
     def on_message(self, message, msg_data):
         """Handle incoming RangeTest messages"""
@@ -630,27 +669,6 @@ class Plugin:
         except Exception as e:
             print(f"[GeoJSON] ⚠️ Error: {e}")
     
-    def append_to_html(self, date, time, lat, lon, accuracy, provider, rssi, snr, q):
-        """Append point to HTML file"""
-        try:
-            # Format None values as null for JavaScript
-            rssi_str = str(rssi) if rssi is not None else 'null'
-            snr_str = str(snr) if snr is not None else 'null'
-            q_str = str(q) if q is not None else 'null'
-            
-            js_line = f"        addPoint({lat}, {lon}, '{date}', '{time}', {accuracy}, {rssi_str}, {snr_str}, {q_str}, '{provider}');\n"
-            
-            with open(self.html_file, 'r') as f:
-                content = f.read()
-            
-            if '// POINTS_START' in content:
-                content = content.replace('// POINTS_START', js_line + '// POINTS_START')
-            
-            with open(self.html_file, 'w') as f:
-                f.write(content)
-        
-        except Exception as e:
-            print(f"[HTML] ⚠️ Error: {e}")
     
     def notify_saved(self):
         """Notify user that point was saved"""
