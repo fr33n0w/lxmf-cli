@@ -842,41 +842,47 @@ class Plugin:
             
             elif cmd in ['rangeexport', 'rex']:
                 self.export_files()
-            
+                        
             elif cmd == 'rangeclear':
-                # Confirm before clearing
-                print(f"\n⚠️ This will delete all logged points!")
+                # Clear all range test files immediately
+                log_dir = os.path.join(self.client.storage_path, "rangetest_logs")
+                
+                if not os.path.exists(log_dir):
+                    print("\n✅ No logs directory found - nothing to clear\n")
+                    return
                 
                 try:
-                    with open(self.json_file, 'r') as f:
-                        data = json.load(f)
-                        point_count = len(data.get('points', []))
+                    # Count files before deletion
+                    files = [f for f in os.listdir(log_dir) if f.startswith('rangetest_')]
+                    file_count = len(files)
                     
-                    if point_count == 0:
-                        print(f"✅ No points to clear\n")
+                    if file_count == 0:
+                        print("\n✅ No range test files found - nothing to clear\n")
                         return
                     
-                    print(f"   Current points: {point_count}")
-                    print(f"\n💡 Export first with: rangeexport")
-                    print(f"   Then confirm clear with: rangeclear confirm\n")
+                    print(f"\n🗑️ Clearing {file_count} range test files...")
+                    
+                    # Delete all rangetest files
+                    for filename in files:
+                        filepath = os.path.join(log_dir, filename)
+                        try:
+                            os.remove(filepath)
+                        except Exception as e:
+                            print(f"⚠️ Could not delete {filename}: {e}")
+                    
+                    # Try to remove the directory if empty
+                    try:
+                        if not os.listdir(log_dir):
+                            os.rmdir(log_dir)
+                            print(f"✅ Cleared all files and removed logs directory\n")
+                        else:
+                            print(f"✅ Cleared {file_count} range test files\n")
+                    except:
+                        print(f"✅ Cleared {file_count} range test files\n")
                 
-                except:
-                    print(f"❌ Error reading points\n")
-            
-            elif cmd == 'rangeclear' and len(parts) > 1 and parts[1] == 'confirm':
-                # Clear all files
-                print(f"\n🗑️ Clearing all range test data...")
-                
-                for filepath in [self.json_file, self.kml_file, self.csv_file, 
-                                self.geojson_file, self.html_file]:
-                    if os.path.exists(filepath):
-                        os.remove(filepath)
-                
-                # Re-initialize
-                self.init_files()
-                
-                print(f"✅ All points cleared - files reset\n")
-            
+                except Exception as e:
+                    print(f"\n❌ Error clearing files: {e}\n")
+
             elif cmd == 'rangestatus':
                 print(f"\n📍 GPS STATUS")
                 print("─"*60)
