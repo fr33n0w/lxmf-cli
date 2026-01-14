@@ -5,7 +5,6 @@ import subprocess
 import os
 import shutil
 from datetime import datetime
-import threading
 
 class Plugin:
     def __init__(self, client):
@@ -23,39 +22,6 @@ class Plugin:
         
         # Initialize files if they don't exist
         self.init_files()
-        
-        # GPS cache and settings
-        self.last_gps = None
-        self.last_gps_time = 0
-        self.gps_cache_timeout = 30  # Use cached GPS if less than 30s old
-        self.gps_lock = threading.Lock()
-        
-        # GPS warm-up on startup
-        self.warmup_gps()
-    
-    def warmup_gps(self):
-        """Warm up GPS on plugin load"""
-        is_termux = os.path.exists('/data/data/com.termux')
-        if not is_termux:
-            return
-        
-        print("[Range Client] 📡 Warming up GPS...")
-        
-        # Start GPS in background
-        def warmup():
-            try:
-                # Try to get location (this warms up GPS)
-                subprocess.run(
-                    ['termux-location', '-p', 'gps'],
-                    capture_output=True,
-                    timeout=15,
-                    env=os.environ.copy()
-                )
-            except:
-                pass
-        
-        thread = threading.Thread(target=warmup, daemon=True)
-        thread.start()
     
     def init_files(self):
         """Initialize all data files if they don't exist"""
@@ -126,7 +92,7 @@ class Plugin:
             f.write(kml_header + kml_footer)
     
     def init_html(self):
-        """Initialize HTML map file"""
+        """Initialize HTML map file with path and heatmap"""
         html = '''<!DOCTYPE html>
 <html>
 <head>
@@ -135,17 +101,27 @@ class Plugin:
     <title>Range Test Coverage Map</title>
     <style>
         body { margin: 0; padding: 0; font-family: Arial, sans-serif; }
-        #map { position: absolute; top: 0; bottom: 100px; width: 100%; }
+        #map { position: absolute; top: 0; bottom: 140px; width: 100%; }
         #info {
-            position: absolute; bottom: 0; width: 100%; height: 100px;
+            position: absolute; bottom: 0; width: 100%; height: 140px;
             background: rgba(255, 255, 255, 0.95); padding: 15px;
             box-sizing: border-box; border-top: 3px solid #0078d4;
             overflow-y: auto;
         }
-        .stat { display: inline-block; margin-right: 20px; font-size: 14px; }
+        .stat { display: inline-block; margin-right: 20px; margin-bottom: 5px; font-size: 14px; }
         .stat-label { font-weight: bold; color: #0078d4; }
+        .legend {
+            background: white;
+            padding: 10px;
+            border-radius: 5px;
+            box-shadow: 0 1px 5px rgba(0,0,0,0.4);
+        }
+        .legend-item {
+            margin: 5px 0;
+            font-size: 12px;
+        }
         @media (max-width: 600px) {
-            #info { height: 120px; }
+            #info { height: 160px; }
             .stat { display: block; margin: 3px 0; }
         }
     </style>
@@ -156,8 +132,10 @@ class Plugin:
     <div id="map"></div>
     <div id="info">
         <div class="stat"><span class="stat-label">Total Points:</span> <span id="points">0</span></div>
+        <div class="stat"><span class="stat-label">Distance:</span> <span id="distance">0 km</span></div>
+        <div class="stat"><span class="stat-label">Avg RSSI:</span> <span id="avgrssi">N/A</span></div>
+        <div class="stat"><span class="stat-label">Avg SNR:</span> <span id="avgsnr">N/A</span></div>
         <div class="stat"><span class="stat-label">Last Update:</span> <span id="lastupdate">-</span></div>
-        <div class="stat"><span class="stat-label">Coverage:</span> <span id="coverage">-</span></div>
     </div>
 
     <script>
@@ -170,55 +148,168 @@ class Plugin:
         
         var markers = [];
         var points = [];
+        var polyline = null;
+        var rssiValues = [];
+        var snrValues = [];
         
         function getSignalColor(rssi) {
-            if (rssi === null || rssi === undefined) return '#0078d4';
-            if (rssi >= -60) return '#00ff00';
-            if (rssi >= -70) return '#7fff00';
-            if (rssi >= -80) return '#ffff00';
-            if (rssi >= -90) return '#ffa500';
-            if (rssi >= -100) return '#ff6600';
-            return '#ff0000';
+            if (rssi === null || rssi === undefined) return '#999999';
+            if (rssi >= -60) return '#00ff00';  // Excellent
+            if (rssi >= -70) return '#7fff00';  // Very Good
+            if (rssi >= -80) return '#ffff00';  // Good
+            if (rssi >= -90) return '#ffa500';  // Fair
+            if (rssi >= -100) return '#ff6600'; // Poor
+            return '#ff0000';                    // Very Poor
+        }
+        
+        function getMarkerSize(rssi) {
+            if (rssi === null || rssi === undefined) return 8;
+            if (rssi >= -60) return 12;
+            if (rssi >= -70) return 10;
+            if (rssi >= -80) return 8;
+            return 6;
+        }
+        
+        function createSignalIcon(rssi, isFirst, isLast) {
+            if (isFirst) {
+                return L.divIcon({
+                    className: 'custom-marker',
+                    html: '<div style="background-color: #00ff00; width: 14px; height: 14px; border-radius: 50%; border: 3px solid white; box-shadow: 0 0 6px rgba(0,0,0,0.6);"></div>',
+                    iconSize: [14, 14],
+                    iconAnchor: [7, 7]
+                });
+            }
+            if (isLast) {
+                return L.divIcon({
+                    className: 'custom-marker',
+                    html: '<div style="background-color: #ff0000; width: 14px; height: 14px; border-radius: 50%; border: 3px solid white; box-shadow: 0 0 6px rgba(0,0,0,0.6);"></div>',
+                    iconSize: [14, 14],
+                    iconAnchor: [7, 7]
+                });
+            }
+            
+            var color = getSignalColor(rssi);
+            var size = getMarkerSize(rssi);
+            return L.divIcon({
+                className: 'custom-marker',
+                html: '<div style="background-color: ' + color + '; width: ' + size + 'px; height: ' + size + 'px; border-radius: 50%; border: 2px solid white; box-shadow: 0 0 4px rgba(0,0,0,0.5);"></div>',
+                iconSize: [size, size],
+                iconAnchor: [size/2, size/2]
+            });
+        }
+        
+        var legend = L.control({position: 'topright'});
+        legend.onAdd = function(map) {
+            var div = L.DomUtil.create('div', 'legend');
+            div.innerHTML = '<div style="font-weight: bold; margin-bottom: 5px;">Range Test Coverage</div>' +
+                          '<div class="legend-item">🟢 Start Point</div>' +
+                          '<div class="legend-item">🔴 End Point</div>' +
+                          '<div class="legend-item">━━ Path</div>' +
+                          '<div style="margin-top: 10px; font-weight: bold; font-size: 11px;">Signal Quality (RSSI):</div>' +
+                          '<div class="legend-item" style="font-size: 11px;">🟢 Excellent (≥-60 dBm)</div>' +
+                          '<div class="legend-item" style="font-size: 11px;">🟡 Good (-70 to -80 dBm)</div>' +
+                          '<div class="legend-item" style="font-size: 11px;">🟠 Fair (-80 to -90 dBm)</div>' +
+                          '<div class="legend-item" style="font-size: 11px;">🔴 Poor (≤-90 dBm)</div>';
+            return div;
+        };
+        legend.addTo(map);
+        
+        function calculateDistance(lat1, lon1, lat2, lon2) {
+            var R = 6371;
+            var dLat = (lat2 - lat1) * Math.PI / 180;
+            var dLon = (lon2 - lon1) * Math.PI / 180;
+            var a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+                    Math.sin(dLon/2) * Math.sin(dLon/2);
+            var c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+            return R * c;
         }
         
         function addPoint(lat, lon, date, time, accuracy, rssi, snr, q, provider) {
+            var isFirst = (points.length === 0);
+            var isLast = false;
+            
             points.push([lat, lon]);
             
-            var color = getSignalColor(rssi);
-            var marker = L.circleMarker([lat, lon], {
-                radius: 6,
-                fillColor: color,
-                color: '#fff',
-                weight: 2,
-                opacity: 1,
-                fillOpacity: 0.8
+            // Track signal stats
+            if (rssi !== null && rssi !== undefined) {
+                rssiValues.push(rssi);
+            }
+            if (snr !== null && snr !== undefined) {
+                snrValues.push(snr);
+            }
+            
+            // Update or create polyline
+            if (polyline) {
+                map.removeLayer(polyline);
+            }
+            polyline = L.polyline(points, {
+                color: 'red',
+                weight: 4,
+                opacity: 0.7
             }).addTo(map);
             
-            var popup = '<b>' + date + ' ' + time + '</b><br>' +
+            // Create marker
+            var icon = createSignalIcon(rssi, isFirst, isLast);
+            var marker = L.marker([lat, lon], {icon: icon}).addTo(map);
+            
+            // Enhanced popup
+            var popup = '<div style="min-width: 180px;"><b>' + date + ' ' + time + '</b><br>' +
                        'Lat: ' + lat.toFixed(6) + '<br>' +
                        'Lon: ' + lon.toFixed(6) + '<br>' +
                        'Accuracy: ±' + accuracy + 'm<br>' +
                        'Provider: ' + provider + '<br>';
             
             if (rssi !== null && rssi !== undefined) {
-                popup += 'RSSI: ' + rssi + ' dBm<br>';
+                popup += 'RSSI: ' + rssi.toFixed(1) + ' dBm<br>';
             }
             if (snr !== null && snr !== undefined) {
-                popup += 'SNR: ' + snr + ' dB<br>';
+                popup += 'SNR: ' + snr.toFixed(1) + ' dB<br>';
             }
             if (q !== null && q !== undefined) {
-                popup += 'Quality: ' + q + '%<br>';
+                popup += 'Quality: ' + q.toFixed(1) + '%<br>';
             }
+            
+            popup += '</div>';
             
             marker.bindPopup(popup);
             markers.push(marker);
             
+            // Calculate total distance
+            var totalDist = 0;
+            for (var i = 1; i < points.length; i++) {
+                totalDist += calculateDistance(
+                    points[i-1][0], points[i-1][1],
+                    points[i][0], points[i][1]
+                );
+            }
+            
+            // Calculate averages
+            var avgRssi = rssiValues.length > 0 ? 
+                rssiValues.reduce((a, b) => a + b, 0) / rssiValues.length : null;
+            var avgSnr = snrValues.length > 0 ? 
+                snrValues.reduce((a, b) => a + b, 0) / snrValues.length : null;
+            
+            // Update stats
             document.getElementById('points').textContent = points.length;
+            document.getElementById('distance').textContent = totalDist.toFixed(2) + ' km';
+            document.getElementById('avgrssi').textContent = avgRssi !== null ? avgRssi.toFixed(1) + ' dBm' : 'N/A';
+            document.getElementById('avgsnr').textContent = avgSnr !== null ? avgSnr.toFixed(1) + ' dB' : 'N/A';
             document.getElementById('lastupdate').textContent = date + ' ' + time;
             
+            // Fit bounds
             if (points.length > 0) {
-                var bounds = L.latLngBounds(points);
-                map.fitBounds(bounds, {padding: [50, 50]});
+                map.fitBounds(polyline.getBounds(), {padding: [50, 50]});
+            }
+        }
+        
+        function markEndPoint() {
+            if (markers.length > 0) {
+                map.removeLayer(markers[markers.length - 1]);
+                var lastPoint = points[points.length - 1];
+                var endMarker = L.marker(lastPoint, {icon: createSignalIcon(null, false, true)}).addTo(map);
+                endMarker.bindPopup('<b>END</b><br>Final Position<br>Total Points: ' + points.length);
+                markers[markers.length - 1] = endMarker;
             }
         }
         
@@ -244,8 +335,8 @@ class Plugin:
                 print(f"{'='*60}")
                 print(f"Message: {content}")
                 
-                # Get GPS location (with multiple attempts)
-                gps_data = self.get_gps_location_robust()
+                # Get GPS location (satellite first, network fallback)
+                gps_data = self.get_gps_location()
                 
                 if gps_data:
                     # Extract signal data from message
@@ -259,7 +350,7 @@ class Plugin:
                     print(f"      Provider: {gps_data.get('provider', 'unknown')}")
                     
                     if rssi is not None:
-                        print(f"[RSSI] {rssi:.1f} dBm", end="")
+                        print(f"[Signal] RSSI: {rssi:.1f} dBm", end="")
                         if snr is not None:
                             print(f" | SNR: {snr:.1f} dB", end="")
                         if q is not None:
@@ -269,19 +360,7 @@ class Plugin:
                     # Notify
                     self.notify_saved()
                 else:
-                    print(f"[GPS] ❌ GPS unavailable after all attempts")
-                    print(f"      Using last known position if available...")
-                    
-                    # Fallback: use cached GPS if less than 2 minutes old
-                    if self.last_gps and (time.time() - self.last_gps_time) < 120:
-                        age = int(time.time() - self.last_gps_time)
-                        print(f"[GPS] 📍 Using cached GPS ({age}s old)")
-                        
-                        rssi, snr, q = self.extract_link_stats(message)
-                        self.save_point(self.last_gps, rssi, snr, q)
-                        self.notify_saved()
-                    else:
-                        print(f"[GPS] ⚠️ No cached GPS available - point NOT logged")
+                    print(f"[GPS] ❌ GPS unavailable - point NOT logged")
                 
                 print(f"{'='*60}\n")
                 
@@ -294,63 +373,32 @@ class Plugin:
         
         return False
     
-    def get_gps_location_robust(self):
-        """Get GPS location with multiple attempts and fallbacks"""
+    def get_gps_location(self):
+        """Get GPS location - satellite first (10s), fallback to network (3s)"""
         is_termux = os.path.exists('/data/data/com.termux')
         
         if not is_termux:
             return None
         
-        with self.gps_lock:
-            # Strategy 1: Try network first (fastest, works indoors)
-            print("[GPS] Attempt 1: Network provider...")
-            gps = self.try_gps_provider('network', timeout=3)
-            if gps:
-                self.last_gps = gps
-                self.last_gps_time = time.time()
-                return gps
-            
-            # Strategy 2: Try GPS provider (accurate but slow)
-            print("[GPS] Attempt 2: GPS provider...")
-            gps = self.try_gps_provider('gps', timeout=10)
-            if gps:
-                self.last_gps = gps
-                self.last_gps_time = time.time()
-                return gps
-            
-            # Strategy 3: Try passive provider
-            print("[GPS] Attempt 3: Passive provider...")
-            gps = self.try_gps_provider('passive', timeout=3)
-            if gps:
-                self.last_gps = gps
-                self.last_gps_time = time.time()
-                return gps
-            
-            # Strategy 4: Try default (no provider specified)
-            print("[GPS] Attempt 4: Default provider...")
-            gps = self.try_gps_provider(None, timeout=5)
-            if gps:
-                self.last_gps = gps
-                self.last_gps_time = time.time()
-                return gps
-            
-            # Strategy 5: Try with -r once flag (single update)
-            print("[GPS] Attempt 5: Single update mode...")
-            gps = self.try_gps_single_update()
-            if gps:
-                self.last_gps = gps
-                self.last_gps_time = time.time()
-                return gps
-            
-            return None
+        # Strategy 1: Try GPS (satellite) first with 10 second timeout
+        print("[GPS] Attempt 1: GPS satellite (10s timeout)...")
+        gps = self.try_gps_provider('gps', timeout=10)
+        if gps:
+            return gps
+        
+        # Strategy 2: Fallback to network provider with 3 second timeout
+        print("[GPS] Attempt 2: Network provider (3s timeout)...")
+        gps = self.try_gps_provider('network', timeout=3)
+        if gps:
+            return gps
+        
+        # No GPS available
+        return None
     
     def try_gps_provider(self, provider, timeout=5):
         """Try to get GPS from specific provider"""
         try:
-            if provider:
-                cmd = ['termux-location', '-p', provider]
-            else:
-                cmd = ['termux-location']
+            cmd = ['termux-location', '-p', provider, '-r', 'once']
             
             result = subprocess.run(
                 cmd,
@@ -368,11 +416,11 @@ class Plugin:
                         lat = data.get('latitude')
                         lon = data.get('longitude')
                         
-                        # Validate coordinates
+                        # Validate coordinates (must be non-zero)
                         if lat and lon and (abs(lat) > 0.001 or abs(lon) > 0.001):
                             # Add provider info
                             if 'provider' not in data:
-                                data['provider'] = provider if provider else 'default'
+                                data['provider'] = provider
                             
                             print(f"[GPS] ✅ Got location from {data['provider']}")
                             return data
@@ -380,41 +428,11 @@ class Plugin:
                     print(f"[GPS] ⚠️ JSON decode error: {e}")
         
         except subprocess.TimeoutExpired:
-            print(f"[GPS] ⏱️ Timeout")
+            print(f"[GPS] ⏱️ {provider} timeout")
         except FileNotFoundError:
-            print(f"[GPS] ❌ termux-location not found - install termux-api package")
+            print(f"[GPS] ❌ termux-location not found")
         except Exception as e:
             print(f"[GPS] ⚠️ Error: {e}")
-        
-        return None
-    
-    def try_gps_single_update(self):
-        """Try GPS with -r once flag (request single update)"""
-        try:
-            result = subprocess.run(
-                ['termux-location', '-r', 'once'],
-                capture_output=True,
-                text=True,
-                timeout=8,
-                env=os.environ.copy()
-            )
-            
-            if result.returncode == 0 and result.stdout.strip():
-                data = json.loads(result.stdout.strip())
-                
-                if 'latitude' in data and 'longitude' in data:
-                    lat = data.get('latitude')
-                    lon = data.get('longitude')
-                    
-                    if lat and lon and (abs(lat) > 0.001 or abs(lon) > 0.001):
-                        if 'provider' not in data:
-                            data['provider'] = 'once'
-                        
-                        print(f"[GPS] ✅ Got location (single update)")
-                        return data
-        
-        except Exception as e:
-            print(f"[GPS] ⚠️ Single update error: {e}")
         
         return None
     
@@ -797,62 +815,28 @@ class Plugin:
                 except:
                     pass
                 
-                # Show cached GPS
-                if self.last_gps:
-                    age = int(time.time() - self.last_gps_time)
-                    print(f"📍 Cached GPS (age: {age}s):")
-                    print(f"   Lat: {self.last_gps['latitude']:.6f}")
-                    print(f"   Lon: {self.last_gps['longitude']:.6f}")
-                    print(f"   Provider: {self.last_gps.get('provider', 'unknown')}")
-                    print()
+                # Test GPS providers in order
+                print("Testing GPS providers...\n")
                 
-                # Test GPS providers
-                print("Testing GPS providers (this may take a moment)...\n")
-                
-                # Quick tests
-                providers = [
-                    ('network', 3),
-                    ('gps', 10),
-                    ('passive', 3)
-                ]
-                
-                working_provider = None
-                
-                for provider, timeout in providers:
-                    print(f"Testing {provider}... ", end="", flush=True)
-                    gps = self.try_gps_provider(provider, timeout)
+                print("1. GPS Satellite (10s timeout)... ", end="", flush=True)
+                gps = self.try_gps_provider('gps', timeout=10)
+                if gps:
+                    print(f"✅ Working")
+                    print(f"   Lat: {gps['latitude']:.6f}, Lon: {gps['longitude']:.6f}")
+                    print(f"   Accuracy: ±{gps.get('accuracy', 0):.0f}m")
+                else:
+                    print(f"❌ Failed")
                     
+                    print("\n2. Network (3s timeout)... ", end="", flush=True)
+                    gps = self.try_gps_provider('network', timeout=3)
                     if gps:
-                        print(f"✅ Working")
+                        print(f"✅ Working (fallback)")
                         print(f"   Lat: {gps['latitude']:.6f}, Lon: {gps['longitude']:.6f}")
                         print(f"   Accuracy: ±{gps.get('accuracy', 0):.0f}m")
-                        working_provider = provider
-                        break
                     else:
                         print(f"❌ Failed")
-                
-                if not working_provider:
-                    print(f"\n⚠️ No GPS providers working!\n")
-                    print(f"💡 Troubleshooting:")
-                    print(f"   1. Check permissions:")
-                    print(f"      Settings → Apps → Termux → Permissions")
-                    print(f"      Enable: Location (allow all the time)")
-                    print(f"   ")
-                    print(f"   2. Disable battery optimization:")
-                    print(f"      Settings → Apps → Termux → Battery")
-                    print(f"      Set to: Unrestricted")
-                    print(f"   ")
-                    print(f"   3. Test manually:")
-                    print(f"      termux-location -p network")
-                    print(f"      termux-location -p gps")
-                    print(f"   ")
-                    print(f"   4. Update Termux:API:")
-                    print(f"      pkg upgrade termux-api")
-                    print(f"      (Update Termux:API app from F-Droid too)")
-                    print(f"   ")
-                    print(f"   5. Try going outside for GPS fix")
-                else:
-                    print(f"\n✅ GPS is working with {working_provider} provider")
+                        print(f"\n⚠️ No GPS providers working!")
+                        print(f"\n💡 Make sure GPS Locker (or similar app) is running!")
                 
                 # Check storage
                 print(f"\n📁 STORAGE STATUS")
@@ -867,7 +851,6 @@ class Plugin:
                         print(f"✅ Write permissions OK")
                     except:
                         print(f"❌ Write permission denied")
-                        print(f"   Grant storage permission in Settings")
                 else:
                     print(f"❌ /sdcard/Download/ not found")
                 
