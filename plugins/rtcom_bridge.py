@@ -96,7 +96,7 @@ class Plugin:
                         # Start range test: s <#> rt <N> <D>
                         ping_count = parts[3]
                         ping_delay = parts[4]
-                        message = f"[RangeTest] Start - Pings: {ping_count}, Delay: {ping_delay}s"
+                        message = f"rt {ping_count} {ping_delay}"
                         
                         print(f"\n[rtcom→LXMF] Starting range test")
                         print(f"   Target: {contact_target}")
